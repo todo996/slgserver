@@ -4,7 +4,7 @@ import "time"
 
 type User struct {
 	UId      int       `xorm:"uid pk autoincr"`
-	Username string    `xorm:"username" validate:"min=4,max=20,regexp=^[a-zA-Z0-9_]*$"`
+	Username string    `xorm:"username" validate:"min=3,max=20"`
 	Passcode string    `xorm:"passcode"`
 	Passwd   string    `xorm:"passwd"`
 	Hardware string    `xorm:"hardware"`
