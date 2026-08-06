@@ -1,66 +1,106 @@
 package net
 
 import (
+	"encoding/json"
+	"errors"
 	"net/http"
+	"os"
+	"strings"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/llr104/slgserver/log"
 	"go.uber.org/zap"
 )
 
-// http升级websocket协议的配置
 var wsUpgrader = websocket.Upgrader{
-	// 允许所有CORS跨域请求
-	CheckOrigin: func(r *http.Request) bool {
-		return true
-	},
+	HandshakeTimeout: 10 * time.Second,
+	CheckOrigin:      websocketOriginAllowed,
 }
 
-
 type server struct {
-	addr		string
-	router		*Router
-	needSecret 	bool
-	beforeClose func (WSConn)
+	addr        string
+	router      *Router
+	needSecret  bool
+	beforeClose func(WSConn)
 }
 
 func NewServer(addr string, needSecret bool) *server {
-	s := server{
-		addr: addr,
+	return &server{
+		addr:       addr,
 		needSecret: needSecret,
 	}
-	return &s
 }
 
-func (this*server) Router(router *Router) {
+func (this *server) Router(router *Router) {
 	this.router = router
 }
 
+func (this *server) Start() {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", this.healthHandler)
+	mux.HandleFunc("/", this.wsHandler)
 
-func (this*server) Start()  {
-	log.DefaultLog.Info("server starting")
-	http.HandleFunc("/", this.wsHandler)
-	http.ListenAndServe(this.addr, nil)
+	httpServer := &http.Server{
+		Addr:              this.addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	log.DefaultLog.Info("WebSocket service đang khởi động", zap.String("addr", this.addr))
+	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.DefaultLog.Error("WebSocket service dừng do lỗi", zap.Error(err))
+		panic(err)
+	}
 }
 
-func (this*server) SetOnBeforeClose(hookFunc func (WSConn))  {
+func (this *server) SetOnBeforeClose(hookFunc func(WSConn)) {
 	this.beforeClose = hookFunc
 }
 
-func (this*server) wsHandler(resp http.ResponseWriter, req *http.Request) {
+func (this *server) healthHandler(resp http.ResponseWriter, _ *http.Request) {
+	resp.Header().Set("Content-Type", "application/json; charset=utf-8")
+	resp.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(resp).Encode(map[string]string{
+		"status": "ok",
+		"type":   "websocket",
+	})
+}
 
+func (this *server) wsHandler(resp http.ResponseWriter, req *http.Request) {
 	wsSocket, err := wsUpgrader.Upgrade(resp, req, nil)
 	if err != nil {
+		log.DefaultLog.Info("Từ chối kết nối WebSocket", zap.Error(err))
 		return
 	}
 
 	conn := ConnMgr.NewConn(wsSocket, this.needSecret)
-	log.DefaultLog.Info("client connect", zap.String("addr", wsSocket.RemoteAddr().String()))
+	log.DefaultLog.Info("Client đã kết nối", zap.String("addr", wsSocket.RemoteAddr().String()))
 
 	conn.SetRouter(this.router)
 	conn.SetOnClose(ConnMgr.RemoveConn)
 	conn.SetOnBeforeClose(this.beforeClose)
 	conn.Start()
 	conn.Handshake()
+}
 
+func websocketOriginAllowed(req *http.Request) bool {
+	origin := strings.TrimSpace(req.Header.Get("Origin"))
+	if origin == "" {
+		// Kết nối giữa các service Railway không bắt buộc gửi Origin.
+		return true
+	}
+
+	configured := strings.TrimSpace(os.Getenv("WS_ALLOWED_ORIGINS"))
+	if configured == "" || configured == "*" {
+		return true
+	}
+
+	for _, allowed := range strings.Split(configured, ",") {
+		if strings.EqualFold(strings.TrimSpace(allowed), origin) {
+			return true
+		}
+	}
+	return false
 }
