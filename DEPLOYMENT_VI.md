@@ -4,7 +4,7 @@ Backend dùng một repository GitHub nhưng chạy thành năm Railway Service 
 
 ## 1. Tạo Supabase PostgreSQL
 
-1. Tạo một Supabase Project mới.
+1. Tạo một Supabase Project mới dành riêng cho game.
 2. Chạy lần lượt mọi tệp trong `supabase/migrations` theo thứ tự tên tệp.
 3. Mở **Connect** và sao chép chuỗi **Session pooler** cổng `5432`.
 4. Không đưa `DATABASE_URL` thật vào mã nguồn hoặc tệp đã commit.
@@ -52,6 +52,14 @@ TZ=Asia/Bangkok
 GATE_PUBLIC_URL=wss://domain-gate-railway
 ```
 
+Giới hạn website được phép kết nối WebSocket:
+
+```dotenv
+WS_ALLOWED_ORIGINS=https://ten-game.vercel.app
+```
+
+Có thể nhập nhiều origin, phân cách bằng dấu phẩy. Kết nối nội bộ Railway không gửi `Origin` vẫn được chấp nhận.
+
 ## 4. Biến riêng của từng service
 
 ### `http-service`
@@ -62,7 +70,7 @@ PORT=8088
 CORS_ALLOWED_ORIGINS=https://ten-game.vercel.app
 ```
 
-Có thể nhập nhiều origin, phân cách bằng dấu phẩy. API đăng ký và đổi mật khẩu chỉ nhận `POST`.
+API đăng ký và đổi mật khẩu chỉ nhận `POST`.
 
 ### `gate-service`
 
@@ -105,18 +113,20 @@ SLG_IS_DEV=false
 
 - Tạo public domain cho `gate-service`; client dùng địa chỉ `wss://...`.
 - Tạo public domain cho `http-service`; client dùng địa chỉ `https://...`.
-- Health check của `http-service`: `/healthz`.
 - Không tạo public domain cho `login`, `chat` và `slg`.
 - Cố định các cổng nội bộ như bảng trên để địa chỉ `*.railway.internal` luôn đúng.
+- Cả năm service đều cung cấp endpoint `/healthz` trên cổng riêng.
+- Cấu hình Railway Healthcheck Path là `/healthz` cho từng service.
 
 ## 6. Bảo mật tài khoản
 
 - Đăng ký tài khoản chỉ nhận HTTP `POST` qua HTTPS.
 - Mật khẩu không được ghi vào query string hoặc log.
-- Mật khẩu mới được lưu bằng bcrypt.
-- Tài khoản MD5 cũ vẫn đăng nhập được một lần và tự nâng cấp sang bcrypt.
+- Client gửi mật khẩu gốc qua TLS; backend lưu bằng bcrypt.
+- Tài khoản MD5 cũ và giai đoạn client-MD5 chuyển tiếp vẫn đăng nhập được, sau đó tự nâng cấp sang bcrypt của mật khẩu gốc.
 - Client chỉ lưu tên tài khoản, không lưu mật khẩu trong `localStorage`.
 - Session và mật khẩu không được trả lại hoặc ghi vào log server.
+- Tên tài khoản và tên nhân vật hỗ trợ Unicode tiếng Việt với giới hạn độ dài được kiểm tra phía server.
 
 ## 7. Cơ chế một lần push
 
@@ -134,16 +144,18 @@ Nghĩa là người quản trị chỉ push một lần, còn Railway tạo năm
 
 GitHub Actions trong `.github/workflows/server-ci.yml` thực hiện:
 
-- chạy unit test, bao gồm bcrypt và nâng cấp mật khẩu cũ;
+- chạy unit test, bao gồm bcrypt và các đường nâng cấp mật khẩu cũ;
 - build đủ năm binary;
 - build Docker image Railway;
 - tạo PostgreSQL sạch;
 - chạy toàn bộ migration Supabase;
-- xác nhận schema và `JSONB`;
+- xác nhận schema, `JSONB` và kiểu cột mật khẩu;
 - mở HTTP Server và kiểm tra `/healthz`;
 - xác nhận đăng ký bằng GET bị chặn;
-- đăng ký bằng POST;
-- xác nhận mật khẩu lưu bằng bcrypt;
-- xác nhận tài khoản trùng trả đúng mã lỗi.
+- đăng ký bằng POST với mật khẩu gốc;
+- xác nhận mật khẩu lưu bằng bcrypt và `passcode` trống;
+- xác nhận tài khoản trùng trả đúng mã lỗi;
+- khởi động đồng thời `login`, `chat`, `slg` và `gate`;
+- kiểm tra `/healthz` của cả bốn WebSocket service.
 
-Chỉ triển khai production khi workflow này hoàn tất thành công.
+Chỉ triển khai production khi cả hai job trong workflow hoàn tất thành công.
