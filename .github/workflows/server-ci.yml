@@ -91,7 +91,7 @@ jobs:
 
       - name: Chạy một container duy nhất
         run: |
-          docker run --detach --rm --network host \
+          docker run --detach --network host \
             --name tam-quoc-one-service \
             --env PORT=18080 \
             --env DATABASE_URL="$DATABASE_URL" \
@@ -105,18 +105,6 @@ jobs:
       - name: Kiểm tra health tổng và năm thành phần
         run: |
           set -euo pipefail
-          cleanup() {
-            status=$?
-            if [ "$status" -ne 0 ]; then
-              echo "===== LOG CONTAINER HỢP NHẤT ====="
-              docker logs tam-quoc-one-service || true
-              echo "=================================="
-            fi
-            docker stop tam-quoc-one-service >/dev/null 2>&1 || true
-            exit "$status"
-          }
-          trap cleanup EXIT
-
           healthy=false
           for attempt in $(seq 1 180); do
             response=$(curl --silent http://127.0.0.1:18080/healthz || true)
@@ -127,7 +115,10 @@ jobs:
             fi
             sleep 1
           done
-          test "$healthy" = "true"
+          if [ "$healthy" != "true" ]; then
+            docker logs tam-quoc-one-service || true
+            exit 1
+          fi
 
           health=$(curl --fail --silent http://127.0.0.1:18080/healthz)
           for child in login chat slg gate http; do
@@ -194,4 +185,4 @@ jobs:
         if: always()
         run: |
           docker logs tam-quoc-one-service || true
-          docker stop tam-quoc-one-service >/dev/null 2>&1 || true
+          docker rm --force tam-quoc-one-service >/dev/null 2>&1 || true
