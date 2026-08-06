@@ -109,7 +109,17 @@ jobs:
           set -euo pipefail
           /tmp/httpserver >/tmp/httpserver.log 2>&1 &
           server_pid=$!
-          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          cleanup() {
+            status=$?
+            if [ "$status" -ne 0 ]; then
+              echo "===== HTTP SERVER LOG ====="
+              cat /tmp/httpserver.log || true
+              echo "==========================="
+            fi
+            kill "$server_pid" 2>/dev/null || true
+            exit "$status"
+          }
+          trap cleanup EXIT
 
           healthy=false
           for attempt in $(seq 1 30); do
@@ -119,26 +129,27 @@ jobs:
             fi
             sleep 1
           done
-
-          if [ "$healthy" != "true" ]; then
-            cat /tmp/httpserver.log
-            exit 1
-          fi
+          echo "healthz=$healthy"
+          test "$healthy" = "true"
 
           get_status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
             'http://127.0.0.1:8088/account/register?username=testuser&password=0123456789abcdef0123456789abcdef')
+          echo "GET /account/register status=$get_status"
           test "$get_status" = "405"
 
-          register_response=$(curl --fail --silent --request POST \
+          register_response=$(curl --silent --show-error --request POST \
             --header 'Content-Type: application/x-www-form-urlencoded' \
             --data-urlencode 'username=testuser' \
             --data-urlencode 'password=0123456789abcdef0123456789abcdef' \
             --data-urlencode 'hardware=github-actions' \
             http://127.0.0.1:8088/account/register)
+          echo "register_response=$register_response"
           echo "$register_response" | grep -q '"code":0'
 
           stored_hash=$(psql -h 127.0.0.1 -U slg -d slgdb -Atc \
             "SELECT passwd FROM public.tb_user_info WHERE username='testuser';")
+          echo "stored_hash_length=${#stored_hash}"
+          echo "stored_hash_prefix=$(printf '%s' "$stored_hash" | cut -c1-4)"
           case "$stored_hash" in
             '$2a$'*|'$2b$'*|'$2y$'*) ;;
             *) echo "Mật khẩu không phải bcrypt"; exit 1 ;;
@@ -146,11 +157,13 @@ jobs:
 
           passcode=$(psql -h 127.0.0.1 -U slg -d slgdb -Atc \
             "SELECT COALESCE(passcode, '') FROM public.tb_user_info WHERE username='testuser';")
+          echo "passcode_length=${#passcode}"
           test -z "$passcode"
 
-          duplicate_response=$(curl --fail --silent --request POST \
+          duplicate_response=$(curl --silent --show-error --request POST \
             --header 'Content-Type: application/x-www-form-urlencoded' \
             --data-urlencode 'username=testuser' \
             --data-urlencode 'password=0123456789abcdef0123456789abcdef' \
             http://127.0.0.1:8088/account/register)
+          echo "duplicate_response=$duplicate_response"
           echo "$duplicate_response" | grep -q '"code":3'
