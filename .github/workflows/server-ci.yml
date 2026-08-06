@@ -65,9 +65,8 @@ jobs:
           --health-retries 10
     env:
       DATABASE_URL: postgresql://slg:slg@127.0.0.1:5432/slgdb?sslmode=disable
-      SERVICE_NAME: http
-      PORT: 8088
       CORS_ALLOWED_ORIGINS: http://localhost:4173
+      WS_ALLOWED_ORIGINS: http://localhost:4173
       XORM_SHOW_SQL: 'false'
       PGPASSWORD: slg
     steps:
@@ -100,14 +99,20 @@ jobs:
         run: |
           test "$(psql -h 127.0.0.1 -U slg -d slgdb -Atc "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_name LIKE 'tb_%';")" -ge 16
           test "$(psql -h 127.0.0.1 -U slg -d slgdb -Atc "SELECT data_type FROM information_schema.columns WHERE table_name='tb_general_1' AND column_name='skills';")" = "jsonb"
+          test "$(psql -h 127.0.0.1 -U slg -d slgdb -Atc "SELECT data_type FROM information_schema.columns WHERE table_name='tb_user_info' AND column_name='passwd';")" = "character varying"
 
-      - name: Build HTTP Server
-        run: go build -o /tmp/httpserver ./main/httpserver.go
+      - name: Build đủ năm service
+        run: |
+          go build -o /tmp/httpserver ./main/httpserver.go
+          go build -o /tmp/loginserver ./main/loginserver.go
+          go build -o /tmp/chatserver ./main/chatserver.go
+          go build -o /tmp/slgserver ./main/slgserver.go
+          go build -o /tmp/gateserver ./main/gateserver.go
 
       - name: Kiểm tra HTTP, đăng ký POST và bcrypt
         run: |
           set -euo pipefail
-          /tmp/httpserver >/tmp/httpserver.log 2>&1 &
+          PORT=8088 /tmp/httpserver >/tmp/httpserver.log 2>&1 &
           server_pid=$!
           cleanup() {
             status=$?
@@ -167,3 +172,52 @@ jobs:
             http://127.0.0.1:8088/account/register)
           echo "duplicate_response=$duplicate_response"
           echo "$duplicate_response" | grep -q '"code":3'
+
+      - name: Khởi động và kiểm tra bốn WebSocket service
+        run: |
+          set -euo pipefail
+
+          PORT=8003 /tmp/loginserver >/tmp/loginserver.log 2>&1 &
+          login_pid=$!
+          PORT=8002 /tmp/chatserver >/tmp/chatserver.log 2>&1 &
+          chat_pid=$!
+          PORT=8001 /tmp/slgserver >/tmp/slgserver.log 2>&1 &
+          slg_pid=$!
+          PORT=8004 \
+          LOGIN_PROXY_URL=ws://127.0.0.1:8003 \
+          CHAT_PROXY_URL=ws://127.0.0.1:8002 \
+          SLG_PROXY_URL=ws://127.0.0.1:8001 \
+          /tmp/gateserver >/tmp/gateserver.log 2>&1 &
+          gate_pid=$!
+
+          cleanup() {
+            status=$?
+            if [ "$status" -ne 0 ]; then
+              for service in login chat slg gate; do
+                echo "===== ${service^^} SERVER LOG ====="
+                cat "/tmp/${service}server.log" || true
+              done
+            fi
+            kill "$login_pid" "$chat_pid" "$slg_pid" "$gate_pid" 2>/dev/null || true
+            exit "$status"
+          }
+          trap cleanup EXIT
+
+          wait_health() {
+            name=$1
+            port=$2
+            for attempt in $(seq 1 60); do
+              if curl --fail --silent "http://127.0.0.1:${port}/healthz" | grep -q '"status":"ok"'; then
+                echo "$name healthcheck thành công"
+                return 0
+              fi
+              sleep 1
+            done
+            echo "$name không sẵn sàng trên cổng $port"
+            return 1
+          }
+
+          wait_health login-service 8003
+          wait_health chat-service 8002
+          wait_health slg-service 8001
+          wait_health gate-service 8004
