@@ -69,6 +69,7 @@ jobs:
       PORT: 8088
       CORS_ALLOWED_ORIGINS: http://localhost:4173
       XORM_SHOW_SQL: 'false'
+      PGPASSWORD: slg
     steps:
       - name: Lấy mã nguồn
         uses: actions/checkout@v4
@@ -88,8 +89,6 @@ jobs:
           sudo apt-get install -y postgresql-client
 
       - name: Chạy migration Supabase
-        env:
-          PGPASSWORD: slg
         run: |
           set -euo pipefail
           for migration in supabase/migrations/*.sql; do
@@ -98,28 +97,60 @@ jobs:
           done
 
       - name: Xác nhận schema game
-        env:
-          PGPASSWORD: slg
         run: |
           test "$(psql -h 127.0.0.1 -U slg -d slgdb -Atc "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_name LIKE 'tb_%';")" -ge 16
-          psql -h 127.0.0.1 -U slg -d slgdb -c "SELECT column_name, data_type FROM information_schema.columns WHERE table_name='tb_general_1' AND column_name='skills';"
+          test "$(psql -h 127.0.0.1 -U slg -d slgdb -Atc "SELECT data_type FROM information_schema.columns WHERE table_name='tb_general_1' AND column_name='skills';")" = "jsonb"
 
       - name: Build HTTP Server
         run: go build -o /tmp/httpserver ./main/httpserver.go
 
-      - name: Kiểm tra HTTP healthcheck với PostgreSQL
+      - name: Kiểm tra HTTP, đăng ký POST và bcrypt
         run: |
           set -euo pipefail
           /tmp/httpserver >/tmp/httpserver.log 2>&1 &
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true' EXIT
 
+          healthy=false
           for attempt in $(seq 1 30); do
             if curl --fail --silent http://127.0.0.1:8088/healthz | grep -q '"status":"ok"'; then
-              exit 0
+              healthy=true
+              break
             fi
             sleep 1
           done
 
-          cat /tmp/httpserver.log
-          exit 1
+          if [ "$healthy" != "true" ]; then
+            cat /tmp/httpserver.log
+            exit 1
+          fi
+
+          get_status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            'http://127.0.0.1:8088/account/register?username=testuser&password=0123456789abcdef0123456789abcdef')
+          test "$get_status" = "405"
+
+          register_response=$(curl --fail --silent --request POST \
+            --header 'Content-Type: application/x-www-form-urlencoded' \
+            --data-urlencode 'username=testuser' \
+            --data-urlencode 'password=0123456789abcdef0123456789abcdef' \
+            --data-urlencode 'hardware=github-actions' \
+            http://127.0.0.1:8088/account/register)
+          echo "$register_response" | grep -q '"code":0'
+
+          stored_hash=$(psql -h 127.0.0.1 -U slg -d slgdb -Atc \
+            "SELECT passwd FROM public.tb_user_info WHERE username='testuser';")
+          case "$stored_hash" in
+            '$2a$'*|'$2b$'*|'$2y$'*) ;;
+            *) echo "Mật khẩu không phải bcrypt"; exit 1 ;;
+          esac
+
+          passcode=$(psql -h 127.0.0.1 -U slg -d slgdb -Atc \
+            "SELECT COALESCE(passcode, '') FROM public.tb_user_info WHERE username='testuser';")
+          test -z "$passcode"
+
+          duplicate_response=$(curl --fail --silent --request POST \
+            --header 'Content-Type: application/x-www-form-urlencoded' \
+            --data-urlencode 'username=testuser' \
+            --data-urlencode 'password=0123456789abcdef0123456789abcdef' \
+            http://127.0.0.1:8088/account/register)
+          echo "$duplicate_response" | grep -q '"code":3'
