@@ -1,9 +1,10 @@
 package logic
 
 import (
-	"fmt"
-	"math/rand"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/labstack/echo/v4"
 	"github.com/llr104/slgserver/constant"
@@ -14,76 +15,115 @@ import (
 )
 
 type UserLogic struct{}
+
 var DefaultUser = UserLogic{}
 
 func (self UserLogic) CreateUser(ctx echo.Context) error {
-	account := ctx.QueryParam("username")
-	pwd := ctx.QueryParam("password")
-	hardware := ctx.QueryParam("hardware")
+	account := strings.TrimSpace(requestParam(ctx, "username"))
+	password := requestParam(ctx, "password")
+	hardware := strings.TrimSpace(requestParam(ctx, "hardware"))
 
-	if len(account) > 0 && len(pwd) > 0 {
-		if self.UserExists("username", account) {
-			return myhttp.New("账号已经存在", constant.UserExist)
-		}
-
-		passcode := fmt.Sprintf("%x", rand.Int31())
-		user := &model.User{
-			Username: account,
-			Passcode: passcode,
-			Passwd: util.Password(pwd, passcode),
-			Hardware: hardware,
-			Ctime: time.Now(),
-			Mtime: time.Now()}
-
-		if _, err := db.MasterDB.Insert(user); err != nil {
-			return myhttp.New("数据库出错", constant.DBError)
-		} else{
-			return nil
-		}
-	}else{
-		return myhttp.New("用户名或密码是空", constant.InvalidParam)
+	if !validUsername(account) || !validPasswordValue(password) {
+		return myhttp.New("Tài khoản hoặc mật khẩu không hợp lệ.", constant.InvalidParam)
 	}
+	if utf8.RuneCountInString(hardware) > 64 {
+		return myhttp.New("Mã thiết bị vượt quá độ dài cho phép.", constant.InvalidParam)
+	}
+	if self.UserExists("username", account) {
+		return myhttp.New("Tài khoản đã tồn tại.", constant.UserExist)
+	}
+
+	passwordHash, err := util.HashPassword(password)
+	if err != nil {
+		return myhttp.New("Không thể bảo mật mật khẩu.", constant.DBError)
+	}
+
+	now := time.Now()
+	user := &model.User{
+		Username: account,
+		Passcode: "",
+		Passwd:   passwordHash,
+		Hardware: hardware,
+		Ctime:    now,
+		Mtime:    now,
+	}
+
+	if _, err = db.MasterDB.Insert(user); err != nil {
+		return myhttp.New("Không thể tạo tài khoản.", constant.DBError)
+	}
+	return nil
 }
 
 func (self UserLogic) ChangePassword(ctx echo.Context) error {
-	account := ctx.QueryParam("username")
-	pwd := ctx.QueryParam("password")
-	newpwd := ctx.QueryParam("newpassword")
+	account := strings.TrimSpace(requestParam(ctx, "username"))
+	password := requestParam(ctx, "password")
+	newPassword := requestParam(ctx, "newpassword")
+
+	if !validUsername(account) || !validPasswordValue(password) || !validPasswordValue(newPassword) {
+		return myhttp.New("Thông tin đổi mật khẩu không hợp lệ.", constant.InvalidParam)
+	}
 
 	user := &model.User{}
-	if len(account) > 0 && len(pwd) > 0 && len(newpwd) > 0{
-		if _, err := db.MasterDB.Where("username=?", account).Get(user); err != nil {
-			return myhttp.New("数据库出错", constant.DBError)
-		}else{
-			if util.Password(pwd, user.Passcode) == user.Passwd {
-				passcode := fmt.Sprintf("%x", rand.Int31())
-				changeData := map[string]interface{}{
-					"passwd": util.Password(newpwd, passcode),
-					"passcode": passcode,
-					"Mtime": time.Now(),
-				}
-
-				if _, err := db.MasterDB.Table(user).Where("username=?", account).Update(changeData); err !=nil {
-					return myhttp.New("数据库出错", constant.DBError)
-				}else{
-					return nil
-				}
-
-			}else{
-				return myhttp.New("原密码错误", constant.PwdIncorrect)
-			}
-		}
-
-	}else{
-		return myhttp.New("用户名或密码是空", constant.InvalidParam)
+	found, err := db.MasterDB.Where("username=?", account).Get(user)
+	if err != nil {
+		return myhttp.New("Không thể đọc dữ liệu tài khoản.", constant.DBError)
 	}
+	if !found {
+		return myhttp.New("Tài khoản không tồn tại.", constant.UserNotExist)
+	}
+
+	valid, _ := util.VerifyPassword(password, user.Passwd, user.Passcode)
+	if !valid {
+		return myhttp.New("Mật khẩu hiện tại không chính xác.", constant.PwdIncorrect)
+	}
+
+	passwordHash, err := util.HashPassword(newPassword)
+	if err != nil {
+		return myhttp.New("Không thể bảo mật mật khẩu mới.", constant.DBError)
+	}
+
+	changeData := map[string]interface{}{
+		"passwd":   passwordHash,
+		"passcode": "",
+		"mtime":    time.Now(),
+	}
+	if _, err = db.MasterDB.Table(user).Where("username=?", account).Update(changeData); err != nil {
+		return myhttp.New("Không thể cập nhật mật khẩu.", constant.DBError)
+	}
+	return nil
 }
 
-func (UserLogic) UserExists(field, val string) bool {
-	userLogin := &model.User{}
-	_, err := db.MasterDB.Where(field+"=?", val).Get(userLogin)
-	if err != nil || userLogin.UId == 0 {
+func (UserLogic) UserExists(field, value string) bool {
+	user := &model.User{}
+	found, err := db.MasterDB.Where(field+"=?", value).Get(user)
+	return err == nil && found && user.UId != 0
+}
+
+func requestParam(ctx echo.Context, name string) string {
+	if value := ctx.FormValue(name); value != "" {
+		return value
+	}
+	return ctx.QueryParam(name)
+}
+
+func validUsername(value string) bool {
+	length := utf8.RuneCountInString(value)
+	if length < 3 || length > 20 {
+		return false
+	}
+
+	for _, char := range value {
+		if unicode.IsLetter(char) || unicode.IsNumber(char) || char == '_' || char == '-' || char == '.' {
+			continue
+		}
 		return false
 	}
 	return true
+}
+
+func validPasswordValue(value string) bool {
+	// Client hiện gửi chuỗi MD5 32 ký tự qua HTTPS/WSS. Giới hạn rộng hơn
+	// giúp backend tương thích với client mới trong tương lai mà không nhận dữ liệu quá lớn.
+	length := len(value)
+	return length >= 8 && length <= 128
 }
