@@ -1,41 +1,51 @@
-# Triển khai backend Tam Quốc
+# Triển khai backend Tam Quốc bằng một Railway Service
 
-Backend dùng một repository GitHub nhưng chạy thành năm Railway Service độc lập. Sau khi thiết lập lần đầu, một lần push lên nhánh kết nối sẽ tự kích hoạt triển khai cho cả năm service.
+Backend production chạy trong **một container duy nhất**. Container tự khởi động và giám sát năm thành phần nội bộ: HTTP, Gate, Login, Chat và SLG.
 
 ## 1. Tạo Supabase PostgreSQL
 
 1. Tạo một Supabase Project mới dành riêng cho game.
-2. Chạy lần lượt mọi tệp trong `supabase/migrations` theo thứ tự tên tệp.
-3. Mở **Connect** và sao chép chuỗi **Session pooler** cổng `5432`.
-4. Không đưa `DATABASE_URL` thật vào mã nguồn hoặc tệp đã commit.
+2. Chạy lần lượt mọi tệp trong `supabase/migrations` theo đúng thứ tự tên.
+3. Mở **Connect** và sao chép chuỗi **Session Pooler** cổng `5432`.
+4. Không đưa `DATABASE_URL` thật vào mã nguồn.
 
-Các migration hiện thực hiện:
+Thứ tự migration:
 
-- tạo toàn bộ bảng game tương đương schema MySQL cũ;
-- chuyển dữ liệu cấu trúc sang `JSONB`;
-- sửa cột mật khẩu sang `VARCHAR` để PostgreSQL không đệm khoảng trắng;
-- bật Row Level Security;
-- thu hồi quyền trực tiếp của `anon` và `authenticated`.
+```text
+202608060001_initial_schema.sql
+202608060002_lock_down_data_api.sql
+202608060003_json_columns.sql
+202608060004_password_columns.sql
+```
 
-Client Cocos không kết nối Supabase trực tiếp. Mọi truy cập dữ liệu phải đi qua backend Railway.
+Client không kết nối trực tiếp Supabase. Mọi dữ liệu đi qua backend Railway.
 
-## 2. Tạo một Railway Project với năm Service
+## 2. Tạo đúng một Railway Service
 
-Tạo năm service từ cùng repository `slgserver`, cùng nhánh triển khai và cùng Dockerfile `Dockerfile.railway`.
+1. Tạo một Railway Project.
+2. Chọn **New Service → GitHub Repo**.
+3. Chọn repository `slgserver`.
+4. Chọn nhánh `main`.
+5. Không tạo thêm bốn service khác.
+6. Không đặt Start Command thủ công.
+7. Railway tự dùng `Dockerfile.railway` và `railway.json`.
 
-| Railway Service | `SERVICE_NAME` | `PORT` | Truy cập public |
-| --- | --- | ---: | --- |
-| `gate-service` | `gate` | `8004` | Có, WebSocket/WSS |
-| `http-service` | `http` | `8088` | Có, HTTPS |
-| `login-service` | `login` | `8003` | Không |
-| `chat-service` | `chat` | `8002` | Không |
-| `slg-service` | `slg` | `8001` | Không |
+Cấu trúc chạy bên trong container:
 
-Mỗi service dùng cấu hình build từ `railway.json`. Không cần năm repository và không cần năm Dockerfile.
+```text
+Cổng public Railway $PORT
+├── HTTP thường → httpserver :8088
+└── WebSocket   → gateserver :8004
+                    ├── loginserver :8003
+                    ├── chatserver  :8002
+                    └── slgserver   :8001
+```
 
-## 3. Biến môi trường dùng chung
+Các cổng `8001–8004` và `8088` chỉ mở trên localhost trong container, không cần public domain riêng.
 
-Đặt cho các service cần truy cập cơ sở dữ liệu:
+## 3. Biến môi trường Railway
+
+Thêm vào **Variables** của service duy nhất:
 
 ```dotenv
 DATABASE_URL=<SESSION_POOLER_SUPABASE_PORT_5432>
@@ -44,118 +54,148 @@ DB_MAX_OPEN_CONNS=10
 XORM_SHOW_SQL=false
 XORM_LOG_LEVEL=1
 TZ=Asia/Bangkok
-```
 
-Đặt domain public của Gateway cho `login-service` và có thể đặt thành Shared Variable trong Railway Project:
-
-```dotenv
-GATE_PUBLIC_URL=wss://domain-gate-railway
-```
-
-Giới hạn website được phép kết nối WebSocket:
-
-```dotenv
-WS_ALLOWED_ORIGINS=https://ten-game.vercel.app
-```
-
-Có thể nhập nhiều origin, phân cách bằng dấu phẩy. Kết nối nội bộ Railway không gửi `Origin` vẫn được chấp nhận.
-
-## 4. Biến riêng của từng service
-
-### `http-service`
-
-```dotenv
-SERVICE_NAME=http
-PORT=8088
 CORS_ALLOWED_ORIGINS=https://ten-game.vercel.app
-```
+WS_ALLOWED_ORIGINS=https://ten-game.vercel.app
 
-API đăng ký và đổi mật khẩu chỉ nhận `POST`.
-
-### `gate-service`
-
-```dotenv
-SERVICE_NAME=gate
-PORT=8004
 GATE_NEED_SECRET=true
-SLG_PROXY_URL=ws://slg-service.railway.internal:8001
-CHAT_PROXY_URL=ws://chat-service.railway.internal:8002
-LOGIN_PROXY_URL=ws://login-service.railway.internal:8003
-```
-
-### `login-service`
-
-```dotenv
-SERVICE_NAME=login
-PORT=8003
 LOGIN_NEED_SECRET=false
-GATE_PUBLIC_URL=wss://domain-gate-railway
-```
-
-### `chat-service`
-
-```dotenv
-SERVICE_NAME=chat
-PORT=8002
 CHAT_NEED_SECRET=false
-```
-
-### `slg-service`
-
-```dotenv
-SERVICE_NAME=slg
-PORT=8001
 SLG_NEED_SECRET=false
 SLG_IS_DEV=false
+GAME_SERVER_ID=1
+STARTUP_TIMEOUT=180s
 ```
 
-## 5. Public domain và health check
+Không cần các biến sau của kiến trúc cũ:
 
-- Tạo public domain cho `gate-service`; client dùng địa chỉ `wss://...`.
-- Tạo public domain cho `http-service`; client dùng địa chỉ `https://...`.
-- Không tạo public domain cho `login`, `chat` và `slg`.
-- Cố định các cổng nội bộ như bảng trên để địa chỉ `*.railway.internal` luôn đúng.
-- Cả năm service đều cung cấp endpoint `/healthz` trên cổng riêng.
-- Cấu hình Railway Healthcheck Path là `/healthz` cho từng service.
+```text
+SERVICE_NAME
+HTTP_PORT
+GATE_PORT
+LOGIN_PORT
+CHAT_PORT
+SLG_PORT
+SLG_PROXY_URL
+CHAT_PROXY_URL
+LOGIN_PROXY_URL
+```
 
-## 6. Bảo mật tài khoản
+Railway tự cấp biến `PORT`. Không đặt `PORT` thủ công trừ khi đang chạy local.
 
-- Đăng ký tài khoản chỉ nhận HTTP `POST` qua HTTPS.
-- Mật khẩu không được ghi vào query string hoặc log.
-- Client gửi mật khẩu gốc qua TLS; backend lưu bằng bcrypt.
-- Tài khoản MD5 cũ và giai đoạn client-MD5 chuyển tiếp vẫn đăng nhập được, sau đó tự nâng cấp sang bcrypt của mật khẩu gốc.
-- Client chỉ lưu tên tài khoản, không lưu mật khẩu trong `localStorage`.
-- Session và mật khẩu không được trả lại hoặc ghi vào log server.
-- Tên tài khoản và tên nhân vật hỗ trợ Unicode tiếng Việt với giới hạn độ dài được kiểm tra phía server.
+### `GATE_PUBLIC_URL`
 
-## 7. Cơ chế một lần push
+Bộ khởi chạy tự tạo `GATE_PUBLIC_URL` từ `RAILWAY_PUBLIC_DOMAIN` nếu Railway cung cấp biến đó. Có thể đặt thủ công nếu cần:
 
-Cả năm Railway Service đều kết nối tới cùng repository và nhánh. Khi có commit mới:
+```dotenv
+GATE_PUBLIC_URL=wss://domain-backend.up.railway.app
+```
 
-1. GitHub nhận một lần push.
-2. Railway phát hiện commit mới ở cả năm service.
-3. Mỗi service build cùng `Dockerfile.railway`.
-4. `SERVICE_NAME` quyết định binary cần chạy.
-5. Năm service được cập nhật độc lập.
+## 4. Tạo một public domain
 
-Nghĩa là người quản trị chỉ push một lần, còn Railway tạo năm deployment tự động.
+Trong service duy nhất:
 
-## 8. Kiểm tra trước khi phát hành
+1. Mở **Settings → Networking**.
+2. Chọn **Generate Domain**.
+3. Ghi lại domain HTTPS.
 
-GitHub Actions trong `.github/workflows/server-ci.yml` thực hiện:
+Ví dụ:
 
-- chạy unit test, bao gồm bcrypt và các đường nâng cấp mật khẩu cũ;
-- build đủ năm binary;
-- build Docker image Railway;
-- tạo PostgreSQL sạch;
-- chạy toàn bộ migration Supabase;
-- xác nhận schema, `JSONB` và kiểu cột mật khẩu;
-- mở HTTP Server và kiểm tra `/healthz`;
-- xác nhận đăng ký bằng GET bị chặn;
-- đăng ký bằng POST với mật khẩu gốc;
-- xác nhận mật khẩu lưu bằng bcrypt và `passcode` trống;
-- xác nhận tài khoản trùng trả đúng mã lỗi;
-- khởi động đồng thời `login`, `chat`, `slg` và `gate`;
-- kiểm tra `/healthz` của cả bốn WebSocket service.
+```text
+https://tam-quoc-server-production.up.railway.app
+```
 
-Chỉ triển khai production khi cả hai job trong workflow hoàn tất thành công.
+Client dùng cùng domain với hai giao thức:
+
+```dotenv
+GAME_HTTP_URL=https://tam-quoc-server-production.up.railway.app
+GAME_WS_URL=wss://tam-quoc-server-production.up.railway.app
+```
+
+Không thêm `/api` hoặc `/ws`. Reverse proxy tự nhận biết WebSocket Upgrade.
+
+## 5. Healthcheck
+
+`railway.json` đã cấu hình:
+
+```text
+/healthz
+```
+
+Phản hồi thành công có dạng:
+
+```json
+{
+  "status": "ok",
+  "service": "allserver",
+  "children": {
+    "http": "ok",
+    "gate": "ok",
+    "login": "ok",
+    "chat": "ok",
+    "slg": "ok"
+  }
+}
+```
+
+`/readyz` trả cùng trạng thái tổng hợp.
+
+Nếu một tiến trình con chết ngoài dự kiến, bộ giám sát làm toàn container thoát với mã lỗi để Railway restart service. Điều này tránh trường hợp container còn xanh nhưng một phần game đã chết.
+
+## 6. Đồng bộ với Vercel
+
+Sau khi Vercel cấp domain client, ví dụ:
+
+```text
+https://tam-quoc-viet-nam.vercel.app
+```
+
+Cập nhật hai biến Railway:
+
+```dotenv
+CORS_ALLOWED_ORIGINS=https://tam-quoc-viet-nam.vercel.app
+WS_ALLOWED_ORIGINS=https://tam-quoc-viet-nam.vercel.app
+```
+
+Nếu có nhiều domain, phân cách bằng dấu phẩy:
+
+```dotenv
+CORS_ALLOWED_ORIGINS=https://tam-quoc-viet-nam.vercel.app,https://game.example.com
+WS_ALLOWED_ORIGINS=https://tam-quoc-viet-nam.vercel.app,https://game.example.com
+```
+
+Sau khi sửa Variables, Railway chỉ redeploy **một service**.
+
+## 7. Cơ chế một lần deploy
+
+Sau thiết lập ban đầu:
+
+```text
+Push một lần lên GitHub main
+→ Railway build một Docker image
+→ Railway deploy một container
+→ container khởi động đủ năm thành phần
+```
+
+Không còn năm deployment độc lập.
+
+## 8. Kiểm tra tự động
+
+GitHub Actions thực hiện đúng mô hình production:
+
+- chạy unit test;
+- build `allserver` và năm binary;
+- build Docker image;
+- tạo PostgreSQL 16 sạch;
+- chạy toàn bộ migration;
+- chạy một container duy nhất;
+- xác nhận `/healthz` có đủ năm thành phần;
+- đăng ký tài khoản qua cổng public;
+- xác nhận bcrypt trong PostgreSQL;
+- kiểm tra WebSocket `101 Switching Protocols` qua cùng cổng public.
+
+Chỉ merge vào `main` khi cả hai job CI đều thành công.
+
+## 9. Lưu ý vận hành
+
+Một service phù hợp cho giai đoạn demo và lượng người chơi ban đầu. Năm thành phần dùng chung CPU/RAM và cùng restart khi một thành phần lỗi. Khi lượng người chơi lớn, có thể tách lại thành nhiều service mà không thay đổi protocol game hoặc schema Supabase.
