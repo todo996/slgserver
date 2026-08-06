@@ -69,15 +69,13 @@ func UnZip(data []byte) ([]byte, error) {
 	return unzipData, nil
 }
 
-// Password giữ lại thuật toán MD5 cũ để xác thực và nâng cấp các tài khoản
-// đã tồn tại trước khi hệ thống chuyển sang bcrypt.
+// Password giữ lại thuật toán MD5 cũ để xác thực và nâng cấp tài khoản đã tồn tại.
 func Password(password, passwordCode string) string {
 	return Md5(password + passwordCode)
 }
 
-// HashPassword tạo mật khẩu bcrypt dùng cho tài khoản mới và mật khẩu mới.
-// Giá trị đầu vào hiện là chuỗi dẫn xuất từ client; kết nối production bắt buộc
-// chạy qua HTTPS/WSS để giá trị này không bị lộ trên đường truyền.
+// HashPassword dùng bcrypt trực tiếp trên mật khẩu người dùng. Production bắt
+// buộc chạy qua HTTPS/WSS để mật khẩu được bảo vệ trên đường truyền.
 func HashPassword(password string) (string, error) {
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
@@ -86,20 +84,37 @@ func HashPassword(password string) (string, error) {
 	return string(hash), nil
 }
 
-// VerifyPassword trả về (hợp lệ, cần_nâng_cấp).
-// Tài khoản MD5 cũ được chấp nhận một lần rồi nâng cấp sang bcrypt.
+// VerifyPassword trả về (hợp_lệ, cần_nâng_cấp).
+// Hàm hỗ trợ ba giai đoạn để cập nhật không làm gián đoạn người chơi:
+//   1. bcrypt của mật khẩu gốc (chuẩn mới);
+//   2. bcrypt của MD5 phía client (bản chuyển tiếp);
+//   3. MD5 có passcode của hệ thống cũ.
 func VerifyPassword(password, storedHash, legacyPasswordCode string) (bool, bool) {
 	if isBcryptHash(storedHash) {
-		return bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(password)) == nil, false
-	}
+		if bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(password)) == nil {
+			return true, false
+		}
 
-	legacyHash := Password(password, legacyPasswordCode)
-	if len(legacyHash) != len(storedHash) {
+		legacyClientValue := Md5(password)
+		if bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(legacyClientValue)) == nil {
+			return true, true
+		}
 		return false, false
 	}
 
-	valid := subtle.ConstantTimeCompare([]byte(legacyHash), []byte(storedHash)) == 1
-	return valid, valid
+	// Client mới gửi mật khẩu gốc; client cũ có thể vẫn gửi MD5 32 ký tự.
+	legacyCandidates := []string{
+		Password(Md5(password), legacyPasswordCode),
+		Password(password, legacyPasswordCode),
+	}
+
+	valid := 0
+	for _, candidate := range legacyCandidates {
+		if len(candidate) == len(storedHash) {
+			valid |= subtle.ConstantTimeCompare([]byte(candidate), []byte(storedHash))
+		}
+	}
+	return valid == 1, valid == 1
 }
 
 func isBcryptHash(value string) bool {
