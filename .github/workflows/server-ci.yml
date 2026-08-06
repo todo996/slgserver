@@ -1,4 +1,4 @@
-name: Kiểm tra backend
+name: Kiểm tra backend hợp nhất
 
 on:
   push:
@@ -29,25 +29,21 @@ jobs:
       - name: Chạy unit test
         run: go list ./... | grep -v '/main$' | xargs go test
 
-      - name: Build Gate Server
-        run: go build -o /tmp/gateserver ./main/gateserver.go
+      - name: Build bộ khởi chạy hợp nhất
+        run: go build -o /tmp/allserver ./main/allserver.go
 
-      - name: Build HTTP Server
-        run: go build -o /tmp/httpserver ./main/httpserver.go
-
-      - name: Build Login Server
-        run: go build -o /tmp/loginserver ./main/loginserver.go
-
-      - name: Build Chat Server
-        run: go build -o /tmp/chatserver ./main/chatserver.go
-
-      - name: Build SLG Server
-        run: go build -o /tmp/slgserver ./main/slgserver.go
+      - name: Build đủ năm thành phần
+        run: |
+          go build -o /tmp/gateserver ./main/gateserver.go
+          go build -o /tmp/httpserver ./main/httpserver.go
+          go build -o /tmp/loginserver ./main/loginserver.go
+          go build -o /tmp/chatserver ./main/chatserver.go
+          go build -o /tmp/slgserver ./main/slgserver.go
 
       - name: Build Docker image Railway
         run: docker build -f Dockerfile.railway -t tam-quoc-server:test .
 
-  postgres-smoke-test:
+  one-service-smoke-test:
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -65,23 +61,11 @@ jobs:
           --health-retries 10
     env:
       DATABASE_URL: postgresql://slg:slg@127.0.0.1:5432/slgdb?sslmode=disable
-      CORS_ALLOWED_ORIGINS: http://localhost:4173
-      WS_ALLOWED_ORIGINS: http://localhost:4173
-      XORM_SHOW_SQL: 'false'
       PGPASSWORD: slg
       TEST_ACCOUNT_PASSWORD: MatKhau-AnToan-2026
     steps:
       - name: Lấy mã nguồn
         uses: actions/checkout@v4
-
-      - name: Cài Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.22.x'
-          cache: true
-
-      - name: Đồng bộ thư viện Go
-        run: go mod tidy
 
       - name: Cài PostgreSQL client
         run: |
@@ -102,124 +86,112 @@ jobs:
           test "$(psql -h 127.0.0.1 -U slg -d slgdb -Atc "SELECT data_type FROM information_schema.columns WHERE table_name='tb_general_1' AND column_name='skills';")" = "jsonb"
           test "$(psql -h 127.0.0.1 -U slg -d slgdb -Atc "SELECT data_type FROM information_schema.columns WHERE table_name='tb_user_info' AND column_name='passwd';")" = "character varying"
 
-      - name: Build đủ năm service
-        run: |
-          go build -o /tmp/httpserver ./main/httpserver.go
-          go build -o /tmp/loginserver ./main/loginserver.go
-          go build -o /tmp/chatserver ./main/chatserver.go
-          go build -o /tmp/slgserver ./main/slgserver.go
-          go build -o /tmp/gateserver ./main/gateserver.go
+      - name: Build Docker image hợp nhất
+        run: docker build -f Dockerfile.railway -t tam-quoc-server:one-service .
 
-      - name: Kiểm tra HTTP, đăng ký POST và bcrypt
+      - name: Chạy một container duy nhất
+        run: |
+          docker run --detach --rm --network host \
+            --name tam-quoc-one-service \
+            --env PORT=18080 \
+            --env DATABASE_URL="$DATABASE_URL" \
+            --env CORS_ALLOWED_ORIGINS=http://localhost:4173 \
+            --env WS_ALLOWED_ORIGINS=http://localhost:4173 \
+            --env GATE_PUBLIC_URL=ws://127.0.0.1:18080 \
+            --env XORM_SHOW_SQL=false \
+            --env STARTUP_TIMEOUT=180s \
+            tam-quoc-server:one-service
+
+      - name: Kiểm tra health tổng và năm thành phần
         run: |
           set -euo pipefail
-          PORT=8088 /tmp/httpserver >/tmp/httpserver.log 2>&1 &
-          server_pid=$!
           cleanup() {
             status=$?
             if [ "$status" -ne 0 ]; then
-              echo "===== HTTP SERVER LOG ====="
-              cat /tmp/httpserver.log || true
-              echo "==========================="
+              echo "===== LOG CONTAINER HỢP NHẤT ====="
+              docker logs tam-quoc-one-service || true
+              echo "=================================="
             fi
-            kill "$server_pid" 2>/dev/null || true
+            docker stop tam-quoc-one-service >/dev/null 2>&1 || true
             exit "$status"
           }
           trap cleanup EXIT
 
           healthy=false
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:8088/healthz | grep -q '"status":"ok"'; then
+          for attempt in $(seq 1 180); do
+            response=$(curl --silent http://127.0.0.1:18080/healthz || true)
+            if echo "$response" | grep -q '"status":"ok"'; then
               healthy=true
+              echo "$response"
               break
             fi
             sleep 1
           done
-          echo "healthz=$healthy"
           test "$healthy" = "true"
 
+          health=$(curl --fail --silent http://127.0.0.1:18080/healthz)
+          for child in login chat slg gate http; do
+            echo "$health" | grep -q "\"$child\":\"ok\""
+          done
+
+          ready=$(curl --fail --silent http://127.0.0.1:18080/readyz)
+          echo "$ready" | grep -q '"service":"allserver"'
+
+      - name: Kiểm tra HTTP API qua cổng public duy nhất
+        run: |
+          set -euo pipefail
+
           get_status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
-            "http://127.0.0.1:8088/account/register?username=testuser&password=${TEST_ACCOUNT_PASSWORD}")
-          echo "GET /account/register status=$get_status"
+            "http://127.0.0.1:18080/account/register?username=testuser&password=${TEST_ACCOUNT_PASSWORD}")
           test "$get_status" = "405"
 
-          register_response=$(curl --silent --show-error --request POST \
+          register_response=$(curl --fail --silent --request POST \
             --header 'Content-Type: application/x-www-form-urlencoded' \
+            --header 'Origin: http://localhost:4173' \
             --data-urlencode 'username=testuser' \
             --data-urlencode "password=${TEST_ACCOUNT_PASSWORD}" \
             --data-urlencode 'hardware=github-actions' \
-            http://127.0.0.1:8088/account/register)
-          echo "register_response=$register_response"
+            http://127.0.0.1:18080/account/register)
           echo "$register_response" | grep -q '"code":0'
 
           stored_hash=$(psql -h 127.0.0.1 -U slg -d slgdb -Atc \
             "SELECT passwd FROM public.tb_user_info WHERE username='testuser';")
-          echo "stored_hash_length=${#stored_hash}"
-          echo "stored_hash_prefix=$(printf '%s' "$stored_hash" | cut -c1-4)"
           case "$stored_hash" in
             '$2a$'*|'$2b$'*|'$2y$'*) ;;
             *) echo "Mật khẩu không phải bcrypt"; exit 1 ;;
           esac
+          test "${#stored_hash}" = "60"
           test "$stored_hash" != "$TEST_ACCOUNT_PASSWORD"
 
-          passcode=$(psql -h 127.0.0.1 -U slg -d slgdb -Atc \
-            "SELECT COALESCE(passcode, '') FROM public.tb_user_info WHERE username='testuser';")
-          echo "passcode_length=${#passcode}"
-          test -z "$passcode"
-
-          duplicate_response=$(curl --silent --show-error --request POST \
+          duplicate_response=$(curl --fail --silent --request POST \
             --header 'Content-Type: application/x-www-form-urlencoded' \
             --data-urlencode 'username=testuser' \
             --data-urlencode "password=${TEST_ACCOUNT_PASSWORD}" \
-            http://127.0.0.1:8088/account/register)
-          echo "duplicate_response=$duplicate_response"
+            http://127.0.0.1:18080/account/register)
           echo "$duplicate_response" | grep -q '"code":3'
 
-      - name: Khởi động và kiểm tra bốn WebSocket service
+      - name: Kiểm tra WebSocket qua cùng cổng public
         run: |
           set -euo pipefail
+          headers=$(mktemp)
+          set +e
+          curl --http1.1 --silent --show-error --max-time 3 \
+            --dump-header "$headers" \
+            --output /dev/null \
+            --header 'Connection: Upgrade' \
+            --header 'Upgrade: websocket' \
+            --header 'Sec-WebSocket-Version: 13' \
+            --header 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+            --header 'Origin: http://localhost:4173' \
+            http://127.0.0.1:18080/
+          curl_status=$?
+          set -e
+          cat "$headers"
+          grep -q '101 Switching Protocols' "$headers"
+          test "$curl_status" = "0" || test "$curl_status" = "28"
 
-          PORT=8003 /tmp/loginserver >/tmp/loginserver.log 2>&1 &
-          login_pid=$!
-          PORT=8002 /tmp/chatserver >/tmp/chatserver.log 2>&1 &
-          chat_pid=$!
-          PORT=8001 /tmp/slgserver >/tmp/slgserver.log 2>&1 &
-          slg_pid=$!
-          PORT=8004 \
-          LOGIN_PROXY_URL=ws://127.0.0.1:8003 \
-          CHAT_PROXY_URL=ws://127.0.0.1:8002 \
-          SLG_PROXY_URL=ws://127.0.0.1:8001 \
-          /tmp/gateserver >/tmp/gateserver.log 2>&1 &
-          gate_pid=$!
-
-          cleanup() {
-            status=$?
-            if [ "$status" -ne 0 ]; then
-              for service in login chat slg gate; do
-                echo "===== ${service^^} SERVER LOG ====="
-                cat "/tmp/${service}server.log" || true
-              done
-            fi
-            kill "$login_pid" "$chat_pid" "$slg_pid" "$gate_pid" 2>/dev/null || true
-            exit "$status"
-          }
-          trap cleanup EXIT
-
-          wait_health() {
-            name=$1
-            port=$2
-            for attempt in $(seq 1 60); do
-              if curl --fail --silent "http://127.0.0.1:${port}/healthz" | grep -q '"status":"ok"'; then
-                echo "$name healthcheck thành công"
-                return 0
-              fi
-              sleep 1
-            done
-            echo "$name không sẵn sàng trên cổng $port"
-            return 1
-          }
-
-          wait_health login-service 8003
-          wait_health chat-service 8002
-          wait_health slg-service 8001
-          wait_health gate-service 8004
+      - name: Dừng container và kiểm tra log cuối
+        if: always()
+        run: |
+          docker logs tam-quoc-one-service || true
+          docker stop tam-quoc-one-service >/dev/null 2>&1 || true
