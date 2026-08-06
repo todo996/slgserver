@@ -46,3 +46,77 @@ jobs:
 
       - name: Build Docker image Railway
         run: docker build -f Dockerfile.railway -t tam-quoc-server:test .
+
+  postgres-smoke-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: slg
+          POSTGRES_PASSWORD: slg
+          POSTGRES_DB: slgdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U slg -d slgdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://slg:slg@127.0.0.1:5432/slgdb?sslmode=disable
+      SERVICE_NAME: http
+      PORT: 8088
+      CORS_ALLOWED_ORIGINS: http://localhost:4173
+      XORM_SHOW_SQL: 'false'
+    steps:
+      - name: Lấy mã nguồn
+        uses: actions/checkout@v4
+
+      - name: Cài Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+          cache: true
+
+      - name: Cài PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Chạy migration Supabase
+        env:
+          PGPASSWORD: slg
+        run: |
+          set -euo pipefail
+          for migration in supabase/migrations/*.sql; do
+            echo "Đang chạy $migration"
+            psql -h 127.0.0.1 -U slg -d slgdb -v ON_ERROR_STOP=1 -f "$migration"
+          done
+
+      - name: Xác nhận schema game
+        env:
+          PGPASSWORD: slg
+        run: |
+          test "$(psql -h 127.0.0.1 -U slg -d slgdb -Atc "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_name LIKE 'tb_%';")" -ge 16
+          psql -h 127.0.0.1 -U slg -d slgdb -c "SELECT column_name, data_type FROM information_schema.columns WHERE table_name='tb_general_1' AND column_name='skills';"
+
+      - name: Build HTTP Server
+        run: go build -o /tmp/httpserver ./main/httpserver.go
+
+      - name: Kiểm tra HTTP healthcheck với PostgreSQL
+        run: |
+          set -euo pipefail
+          /tmp/httpserver >/tmp/httpserver.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8088/healthz | grep -q '"status":"ok"'; then
+              exit 0
+            fi
+            sleep 1
+          done
+
+          cat /tmp/httpserver.log
+          exit 1
