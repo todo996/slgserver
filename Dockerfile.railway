@@ -5,6 +5,7 @@ WORKDIR /src
 
 COPY . .
 RUN go mod tidy \
+    && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/allserver ./main/allserver.go \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/gateserver ./main/gateserver.go \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/httpserver ./main/httpserver.go \
     && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/loginserver ./main/loginserver.go \
@@ -23,7 +24,7 @@ COPY deploy/railway-entrypoint.sh /app/railway-entrypoint.sh
 RUN chmod +x /app/railway-entrypoint.sh
 
 ENV TZ=Asia/Bangkok
-ENV SERVICE_NAME=
+ENV STARTUP_TIMEOUT=180s
 
-EXPOSE 8001 8002 8003 8004 8088
+EXPOSE 8080
 ENTRYPOINT ["/app/railway-entrypoint.sh"]
