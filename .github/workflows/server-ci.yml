@@ -1,0 +1,48 @@
+name: Kiểm tra backend
+
+on:
+  push:
+    branches:
+      - main
+      - 'agent/**'
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Lấy mã nguồn
+        uses: actions/checkout@v4
+
+      - name: Cài Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+          cache: true
+
+      - name: Tải thư viện
+        run: go mod download
+
+      - name: Chạy unit test
+        run: go test ./...
+
+      - name: Build Gate Server
+        run: go build -o /tmp/gateserver ./main/gateserver.go
+
+      - name: Build HTTP Server
+        run: go build -o /tmp/httpserver ./main/httpserver.go
+
+      - name: Build Login Server
+        run: go build -o /tmp/loginserver ./main/loginserver.go
+
+      - name: Build Chat Server
+        run: go build -o /tmp/chatserver ./main/chatserver.go
+
+      - name: Build SLG Server
+        run: go build -o /tmp/slgserver ./main/slgserver.go
+
+      - name: Build Docker image Railway
+        run: docker build -f Dockerfile.railway -t tam-quoc-server:test .
