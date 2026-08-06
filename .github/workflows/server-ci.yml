@@ -69,6 +69,7 @@ jobs:
       WS_ALLOWED_ORIGINS: http://localhost:4173
       XORM_SHOW_SQL: 'false'
       PGPASSWORD: slg
+      TEST_ACCOUNT_PASSWORD: MatKhau-AnToan-2026
     steps:
       - name: Lấy mã nguồn
         uses: actions/checkout@v4
@@ -138,14 +139,14 @@ jobs:
           test "$healthy" = "true"
 
           get_status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
-            'http://127.0.0.1:8088/account/register?username=testuser&password=0123456789abcdef0123456789abcdef')
+            "http://127.0.0.1:8088/account/register?username=testuser&password=${TEST_ACCOUNT_PASSWORD}")
           echo "GET /account/register status=$get_status"
           test "$get_status" = "405"
 
           register_response=$(curl --silent --show-error --request POST \
             --header 'Content-Type: application/x-www-form-urlencoded' \
             --data-urlencode 'username=testuser' \
-            --data-urlencode 'password=0123456789abcdef0123456789abcdef' \
+            --data-urlencode "password=${TEST_ACCOUNT_PASSWORD}" \
             --data-urlencode 'hardware=github-actions' \
             http://127.0.0.1:8088/account/register)
           echo "register_response=$register_response"
@@ -159,6 +160,7 @@ jobs:
             '$2a$'*|'$2b$'*|'$2y$'*) ;;
             *) echo "Mật khẩu không phải bcrypt"; exit 1 ;;
           esac
+          test "$stored_hash" != "$TEST_ACCOUNT_PASSWORD"
 
           passcode=$(psql -h 127.0.0.1 -U slg -d slgdb -Atc \
             "SELECT COALESCE(passcode, '') FROM public.tb_user_info WHERE username='testuser';")
@@ -168,7 +170,7 @@ jobs:
           duplicate_response=$(curl --silent --show-error --request POST \
             --header 'Content-Type: application/x-www-form-urlencoded' \
             --data-urlencode 'username=testuser' \
-            --data-urlencode 'password=0123456789abcdef0123456789abcdef' \
+            --data-urlencode "password=${TEST_ACCOUNT_PASSWORD}" \
             http://127.0.0.1:8088/account/register)
           echo "duplicate_response=$duplicate_response"
           echo "$duplicate_response" | grep -q '"code":3'
