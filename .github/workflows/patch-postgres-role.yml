@@ -1,0 +1,39 @@
+name: Vá tạo nhân vật PostgreSQL
+
+on:
+  push:
+    branches:
+      - agent/railway-supabase-vietnamese
+    paths:
+      - '.github/workflows/patch-postgres-role.yml'
+      - 'scripts/patch-postgres-role.py'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Lấy mã nguồn
+        uses: actions/checkout@v4
+        with:
+          ref: agent/railway-supabase-vietnamese
+
+      - name: Áp dụng bản vá
+        run: python3 scripts/patch-postgres-role.py
+
+      - name: Định dạng Go
+        run: gofmt -w server/slgserver/controller/role.go
+
+      - name: Kiểm tra thay đổi
+        run: git diff --check
+
+      - name: Commit bản vá
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add server/slgserver/controller/role.go
+          git commit -m "Sửa tạo nhân vật cho PostgreSQL và tên tiếng Việt"
+          git push origin HEAD:agent/railway-supabase-vietnamese
