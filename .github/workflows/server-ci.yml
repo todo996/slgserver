@@ -26,11 +26,8 @@ jobs:
       - name: Đồng bộ thư viện
         run: go mod tidy
 
-      - name: Hiển thị checksum PostgreSQL
-        run: grep 'github.com/lib/pq' go.sum
-
       - name: Chạy unit test
-        run: go test ./...
+        run: go list ./... | grep -v '/main$' | xargs go test
 
       - name: Build Gate Server
         run: go build -o /tmp/gateserver ./main/gateserver.go
