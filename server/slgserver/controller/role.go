@@ -1,11 +1,16 @@
 package controller
 
 import (
+	"errors"
 	"math/rand"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/goinggo/mapstructure"
+	"github.com/lib/pq"
 	"github.com/llr104/slgserver/constant"
 	"github.com/llr104/slgserver/db"
 	"github.com/llr104/slgserver/log"
@@ -51,6 +56,12 @@ func (this *Role) create(req *net.WsMsgReq, rsp *net.WsMsgRsp) {
 	reqObj.UId = uid.(int)
 	rspObj.Role.UId = reqObj.UId
 
+	reqObj.NickName = strings.TrimSpace(reqObj.NickName)
+	if !validRoleName(reqObj.NickName) {
+		rsp.Body.Code = constant.InvalidParam
+		return
+	}
+
 	r := make([]model.Role, 0)
 	has, _ := db.MasterDB.Table(r).Where("uid=?", reqObj.UId).Get(r)
 	if has {
@@ -62,10 +73,9 @@ func (this *Role) create(req *net.WsMsgReq, rsp *net.WsMsgRsp) {
 			NickName: reqObj.NickName, CreatedAt: time.Now()}
 
 		if _, err := db.MasterDB.Insert(role); err != nil {
-			log.DefaultLog.Info("role  create error",
+			log.DefaultLog.Info("role create error",
 				zap.Int("uid", reqObj.UId), zap.Error(err))
-			e, _ := err.(*mysql.MySQLError)
-			if 1062 == e.Number {
+			if isUniqueViolation(err) {
 				rsp.Body.Code = constant.RoleNameExist
 			} else {
 				rsp.Body.Code = constant.DBError
@@ -80,6 +90,31 @@ func (this *Role) create(req *net.WsMsgReq, rsp *net.WsMsgRsp) {
 			rsp.Body.Code = constant.OK
 		}
 	}
+}
+
+func validRoleName(name string) bool {
+	runeCount := utf8.RuneCountInString(name)
+	if runeCount < 2 || runeCount > 20 {
+		return false
+	}
+
+	for _, char := range name {
+		if unicode.IsLetter(char) || unicode.IsNumber(char) || unicode.IsSpace(char) || char == '_' || char == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func isUniqueViolation(err error) bool {
+	var postgresError *pq.Error
+	if errors.As(err, &postgresError) && postgresError.Code == "23505" {
+		return true
+	}
+
+	var mysqlError *mysql.MySQLError
+	return errors.As(err, &mysqlError) && mysqlError.Number == 1062
 }
 
 func (this *Role) roleList(req *net.WsMsgReq, rsp *net.WsMsgRsp) {
