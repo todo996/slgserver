@@ -1,12 +1,15 @@
 package logic
 
 import (
+	"errors"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/labstack/echo/v4"
+	"github.com/lib/pq"
 	"github.com/llr104/slgserver/constant"
 	"github.com/llr104/slgserver/db"
 	myhttp "github.com/llr104/slgserver/server/httpserver"
@@ -49,6 +52,9 @@ func (self UserLogic) CreateUser(ctx echo.Context) error {
 	}
 
 	if _, err = db.MasterDB.Insert(user); err != nil {
+		if isUniqueViolation(err) {
+			return myhttp.New("Tài khoản đã tồn tại.", constant.UserExist)
+		}
 		return myhttp.New("Không thể tạo tài khoản.", constant.DBError)
 	}
 	return nil
@@ -100,10 +106,7 @@ func (UserLogic) UserExists(field, value string) bool {
 }
 
 func requestParam(ctx echo.Context, name string) string {
-	if value := ctx.FormValue(name); value != "" {
-		return value
-	}
-	return ctx.QueryParam(name)
+	return ctx.FormValue(name)
 }
 
 func validUsername(value string) bool {
@@ -122,8 +125,17 @@ func validUsername(value string) bool {
 }
 
 func validPasswordValue(value string) bool {
-	// Client hiện gửi chuỗi MD5 32 ký tự qua HTTPS/WSS. Giới hạn rộng hơn
-	// giúp backend tương thích với client mới trong tương lai mà không nhận dữ liệu quá lớn.
-	length := len(value)
-	return length >= 8 && length <= 128
+	// bcrypt chỉ xử lý tối đa 72 byte; giới hạn này được áp dụng trước khi băm.
+	length := len([]byte(value))
+	return length >= 8 && length <= 72
+}
+
+func isUniqueViolation(err error) bool {
+	var postgresError *pq.Error
+	if errors.As(err, &postgresError) && postgresError.Code == "23505" {
+		return true
+	}
+
+	var mysqlError *mysql.MySQLError
+	return errors.As(err, &mysqlError) && mysqlError.Number == 1062
 }
