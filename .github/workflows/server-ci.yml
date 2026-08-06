@@ -79,6 +79,9 @@ jobs:
           go-version: '1.22.x'
           cache: true
 
+      - name: Đồng bộ thư viện Go
+        run: go mod tidy
+
       - name: Cài PostgreSQL client
         run: |
           sudo apt-get update
