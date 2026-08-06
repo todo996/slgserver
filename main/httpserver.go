@@ -2,6 +2,9 @@ package main
 
 import (
 	"log"
+	"net/http"
+	"os"
+	"strings"
 
 	"github.com/labstack/echo/v4"
 	mw "github.com/labstack/echo/v4/middleware"
@@ -11,20 +14,54 @@ import (
 )
 
 func main() {
-
-	db.TestDB()
+	if err := db.TestDB(); err != nil {
+		log.Fatal("Không thể kết nối cơ sở dữ liệu: ", err)
+	}
 
 	e := echo.New()
+	e.HideBanner = true
 	e.Use(mw.Recover())
+	e.Use(mw.CORSWithConfig(mw.CORSConfig{
+		AllowOrigins: allowedOrigins(),
+		AllowMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions},
+		AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization},
+	}))
 
-	g := e.Group("")
-	new(controller.AccountController).RegisterRoutes(g)
-	e.Server.Addr = getHttpAddr()
+	e.GET("/healthz", func(c echo.Context) error {
+		return c.JSON(http.StatusOK, map[string]string{
+			"status":  "ok",
+			"service": "httpserver",
+		})
+	})
+
+	group := e.Group("")
+	new(controller.AccountController).RegisterRoutes(group)
+
+	e.Server.Addr = getHTTPAddr()
+	log.Printf("HTTP Server đang lắng nghe tại %s", e.Server.Addr)
 	log.Fatal(e.StartServer(e.Server))
 }
 
-func getHttpAddr() string {
-	host := config.File.MustValue("httpserver", "host", "")
-	port := config.File.MustValue("httpserver", "port", "8088")
-	return host + ":" + port
+func getHTTPAddr() string {
+	return config.ListenAddress("httpserver", "8088")
+}
+
+func allowedOrigins() []string {
+	value := strings.TrimSpace(os.Getenv("CORS_ALLOWED_ORIGINS"))
+	if value == "" {
+		return []string{"*"}
+	}
+
+	parts := strings.Split(value, ",")
+	origins := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if origin := strings.TrimSpace(part); origin != "" {
+			origins = append(origins, origin)
+		}
+	}
+
+	if len(origins) == 0 {
+		return []string{"*"}
+	}
+	return origins
 }

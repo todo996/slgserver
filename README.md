@@ -1,104 +1,158 @@
-# slg游戏服务器demo
+# Tam Quốc Việt Nam — Backend Go
 
-## 客户端demo：https://github.com/llr104/slgclient
-**鄙视b站、抖音 up主码神之路，从这里拿demo讲课也不说出处，忽悠小白是自己写的**
+Backend game chiến thuật SLG Tam Quốc viết bằng Go, được tổ chức thành năm dịch vụ độc lập và chuẩn bị để triển khai trên Railway, sử dụng Supabase PostgreSQL làm cơ sở dữ liệu.
 
-**代码交流群：1054084192**
+## Kiến trúc dịch vụ
 
-## 概要
-- mysql数据落地，orm映射
-- 事件处理支持中间件
-- 服务器与服务器之间websocket连接
-- 服务器与服务器之间rpc调用
-- 高并发
+```text
+Vercel Client
+    ├── HTTPS → http-service
+    └── WSS   → gate-service
+                    ├── login-service
+                    ├── chat-service
+                    └── slg-service
+                              │
+                              ▼
+                     Supabase PostgreSQL
+```
 
-### 多进程服务
-- httpserver  提供一些api调用
-- gateserver  网关，可以部署多个进行负债均衡，客户端的所有loginserver、chatserver、slgserver的消息都通过该服进行转发
-- loginserver 登录服，可以部署多个进行负债均衡
-- chatserver  聊天服，可以部署多个，原则上一个slgserver对应一个chatserver
-- slgserver   游戏服，可以部署多个，不同服之间的玩家数据不共通
+| Dịch vụ | Vai trò | Cổng mặc định | Public |
+| --- | --- | ---: | --- |
+| `http-service` | API đăng ký và quản lý tài khoản | `8088` | Có |
+| `gate-service` | Gateway WebSocket của client | `8004` | Có |
+| `login-service` | Đăng nhập, session và danh sách server | `8003` | Không |
+| `chat-service` | Trò chuyện trong game | `8002` | Không |
+| `slg-service` | Logic bản đồ, thành trì, tướng, quân đội và liên minh | `8001` | Không |
 
-### 服务端使用简要介绍
-- cd slgserver
-- 项目已经使用go mod管理，推荐使用goland打开
-- 创建MySQL数据库：在MySQL中执行 data/conf/db.sql 文件创建服务所需的数据库，库名默认为slgdb
-- 修改配置： 修改 data/conf/env.ini 中数据库的配置，主要是密码、端口修改成自己所使用的一致即可，其他保持默认即可
-- 拉取依赖包：命令行执行 go mod tidy
-- 生成可执行程序： main 目录下包含了 httpserver、gateserver、loginserver、chatserver、slgserver 5个进程的代码，
-  通过 go build main/xxxserver.go(上方5个进程源代码)即可生成 5个进程执行文件，在windows环境下也可以在直接执行 shell/build.bat
-  生成5个进程可执行文件，可执行文件会存放在bin目录下
-- 复制配置文件到工作目录：将data文件夹拷贝到bin目录下，5个进程会用到data里的配置， window环境可以运行shell/copydata.bat完成拷贝操作
-- 启动运行：启动5个进程，无顺序要求，windows环境下可以运行shell/run.bat代劳
-- 客户端联调：cocos creator打开客户端运行即可联机测试
-- 注意在goland中点击对应的进程 run 或者 debug 前需要将输出路径和工作路径都设置成bin目录，
-  并且data目录已经拷贝到bin目录下，否则进程找不到运行的配置文件会异常终止
+Cả năm dịch vụ dùng chung một repository và một `Dockerfile.railway`. Biến `SERVICE_NAME` quyết định binary nào được chạy trong từng Railway Service.
 
-### 服务部署
+## Công nghệ
 
-**支持docker-compose 一键部署，数据库和表都会创建好的，步骤如下：**
+- Go `1.22` khi build production.
+- XORM.
+- PostgreSQL/Supabase cho production.
+- MySQL chỉ giữ lại để đối chiếu môi trường local cũ.
+- WebSocket giữa client, Gateway và các dịch vụ nội bộ.
+- Docker multi-stage build.
+- GitHub Actions kiểm tra build và tích hợp PostgreSQL.
 
-1. **部署需要编译go源码，编译比较占内存，内存2G以下有可能编译不成功，请保证编译内存在2G以上**
+## Bảo mật tài khoản
 
-2. **cd slgserver**
+- Đăng ký và đổi mật khẩu chỉ nhận HTTP `POST`.
+- Mật khẩu production truyền qua HTTPS/WSS.
+- Mật khẩu mới được lưu bằng bcrypt.
+- Tài khoản MD5 cũ được hỗ trợ đăng nhập và tự nâng cấp sang bcrypt.
+- Mật khẩu và session không được ghi vào log.
+- Client không truy cập Supabase trực tiếp.
+- RLS được bật và quyền Data API của `anon`/`authenticated` bị thu hồi trên bảng game.
 
-3. **docker-compose up**
+## Cấu trúc quan trọng
 
-4. **修改客户端 GameConfig.ts 文件中的连接地址**
+```text
+main/                         Điểm khởi động năm chương trình Go
+server/                       Logic của từng dịch vụ
+net/                          WebSocket, router và kết nối
+supabase/migrations/          Migration PostgreSQL
+Dockerfile.railway            Build đủ năm binary
+railway.json                  Cấu hình Railway
+Deploy/                       Mẫu biến môi trường
+.github/workflows/            CI build và smoke-test
+DEPLOYMENT_VI.md              Hướng dẫn triển khai đầy đủ
+```
 
-   ```typescript
-   import { _decorator } from 'cc';
-   const GameConfig = {
-       serverUrl: "ws://127.0.0.1:8004", //httpserver 地址
-       webUrl: "http://127.0.0.1:8088",  //gateserver 地址
-   }
-   export { GameConfig };
-   
-   ```
+Thư mục biến môi trường trong repository là `deploy/railway.env.example`.
 
-   
+## Chạy kiểm tra
 
-## 客户端截图
+```bash
+go mod tidy
+go list ./... | grep -v '/main$' | xargs go test
+```
 
-### 队伍征兵
-![队伍征兵](https://s1.imagehub.cc/images/2023/05/08/01.png)
+Build riêng từng dịch vụ:
 
-### 占领领地
-![占领领地](https://s1.imagehub.cc/images/2023/05/08/02.png)
+```bash
+go build -o bin/gateserver ./main/gateserver.go
+go build -o bin/httpserver ./main/httpserver.go
+go build -o bin/loginserver ./main/loginserver.go
+go build -o bin/chatserver ./main/chatserver.go
+go build -o bin/slgserver ./main/slgserver.go
+```
 
-### 出征返回
-![出征返回](https://s1.imagehub.cc/images/2023/05/08/03.png)
+Build Docker production:
 
-### 城内设施
-![城内设施](https://s1.imagehub.cc/images/2023/05/08/10.png)
+```bash
+docker build -f Dockerfile.railway -t tam-quoc-server .
+```
 
-### 武将
-![武将](https://s1.imagehub.cc/images/2023/05/08/11a2c81d5956c6dee0.png)
+## Supabase PostgreSQL
 
-### 武将详情
-![武将详情](https://s1.imagehub.cc/images/2023/05/08/12.png)
+Chạy migration theo đúng thứ tự:
 
-### 友方主城
-![友方主城](https://s1.imagehub.cc/images/2023/05/08/04.png)
+```text
+supabase/migrations/202608060001_initial_schema.sql
+supabase/migrations/202608060002_lock_down_data_api.sql
+supabase/migrations/202608060003_json_columns.sql
+supabase/migrations/202608060004_password_columns.sql
+```
 
-### 敌方主城
-![敌方主城](https://s1.imagehub.cc/images/2023/05/08/05.png)
+Backend Railway kết nối bằng `DATABASE_URL` lấy từ **Session Pooler cổng 5432** của Supabase.
 
-### 军队前往敌方主城
-![军队前往敌方主城](https://s1.imagehub.cc/images/2023/05/08/06.png)
+Không chạy migration vào database của dự án khác. Nên tạo một Supabase Project riêng cho game.
 
-### 抽卡结果
-![抽卡结果](https://s1.imagehub.cc/images/2023/05/08/07.png)
+## Railway
 
-### 战报
-![战报](https://s1.imagehub.cc/images/2023/05/08/13.png)
+Tạo một Railway Project, sau đó tạo năm Service cùng trỏ tới repository này và nhánh `main`.
 
-### 技能
-![技能](https://s1.imagehub.cc/images/2023/05/08/08.png)
+Ví dụ:
 
-### 联盟
-![联盟](https://s1.imagehub.cc/images/2023/05/08/09.png)
+```dotenv
+# http-service
+SERVICE_NAME=http
+PORT=8088
 
-### 聊天
-![聊天](https://s1.imagehub.cc/images/2023/05/08/14.png)
+# gate-service
+SERVICE_NAME=gate
+PORT=8004
 
+# login-service
+SERVICE_NAME=login
+PORT=8003
+
+# chat-service
+SERVICE_NAME=chat
+PORT=8002
+
+# slg-service
+SERVICE_NAME=slg
+PORT=8001
+```
+
+Tất cả dịch vụ đều có endpoint:
+
+```text
+/healthz
+```
+
+Chỉ tạo public domain cho `http-service` và `gate-service`.
+
+## Kiểm tra tự động
+
+Workflow backend thực hiện:
+
+- unit test;
+- build đủ năm binary;
+- build Docker image;
+- tạo PostgreSQL 16 sạch;
+- chạy toàn bộ migration Supabase;
+- kiểm tra đăng ký POST và bcrypt;
+- khởi động đồng thời đủ năm dịch vụ;
+- kiểm tra `/healthz` của từng dịch vụ.
+
+## Triển khai
+
+Xem [`DEPLOYMENT_VI.md`](./DEPLOYMENT_VI.md) để có danh sách biến môi trường và thứ tự cấu hình Supabase, Railway và Vercel.
+
+## Giấy phép
+
+Mã nguồn backend kế thừa giấy phép Apache License 2.0 của dự án gốc. Xem tệp [`LICENSE`](./LICENSE).

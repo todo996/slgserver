@@ -1,6 +1,8 @@
 package run
 
 import (
+	"fmt"
+
 	"github.com/llr104/slgserver/config"
 	"github.com/llr104/slgserver/db"
 	"github.com/llr104/slgserver/net"
@@ -18,7 +20,9 @@ import (
 var MyRouter = &net.Router{}
 
 func Init() {
-	db.TestDB()
+	if err := db.TestDB(); err != nil {
+		panic(fmt.Errorf("slg-service không thể kết nối cơ sở dữ liệu: %w", err))
+	}
 
 	static_conf.Basic.Load()
 	static_conf.MapBuildConf.Load()
@@ -36,7 +40,7 @@ func Init() {
 	logic.BeforeInit()
 
 	mgr.NMMgr.Load()
-	//需要先加载联盟相关的信息
+	// Liên minh phải được tải trước các dữ liệu phụ thuộc.
 	mgr.UnionMgr.Load()
 	mgr.RAttrMgr.Load()
 	mgr.RCMgr.Load()
@@ -49,12 +53,11 @@ func Init() {
 	logic.Init()
 	logic.AfterInit()
 
-	//全部初始化完才注册路由，防止服务器还没启动就绪收到请求
+	// Chỉ đăng ký router sau khi dữ liệu và các manager đã sẵn sàng.
 	initRouter()
 }
 
 func initRouter() {
-
 	controller.DefaultRole.InitRouter(MyRouter)
 	controller.DefaultMap.InitRouter(MyRouter)
 	controller.DefaultCity.InitRouter(MyRouter)

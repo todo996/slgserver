@@ -4,8 +4,12 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 
 	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/lib/pq"
 	"github.com/llr104/slgserver/config"
 	"xorm.io/xorm"
 	"xorm.io/xorm/log"
@@ -13,68 +17,26 @@ import (
 
 var MasterDB *xorm.Engine
 
-var dns string
-
-// TestDB 测试数据库
+// TestDB giữ tên hàm cũ để không làm thay đổi các service đang gọi nó.
+// Khi DATABASE_URL tồn tại, hệ thống kết nối trực tiếp PostgreSQL của Supabase.
 func TestDB() error {
-	mysqlConfig, err := config.File.GetSection("mysql")
-	if err != nil {
-		fmt.Println("get mysql config error:", err)
-		panic(err)
-	}
-
-	tmpDns := fmt.Sprintf("%s:%s@tcp(%s:%s)/?charset=%s&parseTime=True&loc=Local",
-		mysqlConfig["user"],
-		mysqlConfig["password"],
-		mysqlConfig["host"],
-		mysqlConfig["port"],
-		mysqlConfig["charset"])
-	egnine, err := xorm.NewEngine("mysql", tmpDns)
-	if err != nil {
-		fmt.Println("new engine error:", err)
-		panic(err)
-	}
-	defer egnine.Close()
-
-	// 测试数据库连接是否 OK
-	if err = egnine.Ping(); err != nil {
-		fmt.Println("ping db error:", err)
-		panic(err)
-	}
-
-	_, err = egnine.Exec("use " + mysqlConfig["dbname"])
-	if err != nil {
-		fmt.Println("use db error:", err)
-		_, err = egnine.Exec("CREATE DATABASE " + mysqlConfig["dbname"] + " DEFAULT CHARACTER SET " + mysqlConfig["charset"])
-		if err != nil {
-			fmt.Println("create database error:", err)
-			panic(err)
-		}
-
-		fmt.Println("create database successfully!")
-	}
-
-	// 初始化 MasterDB
 	return Init()
 }
 
 func Init() error {
+	if databaseURL := strings.TrimSpace(os.Getenv("DATABASE_URL")); databaseURL != "" {
+		return initEngine("postgres", databaseURL)
+	}
+
 	mysqlConfig, err := config.File.GetSection("mysql")
 	if err != nil {
-		fmt.Println("get mysql config error:", err)
-		return err
+		return fmt.Errorf("không đọc được cấu hình MySQL: %w", err)
 	}
 
-	// 启动时就打开数据库连接
-	if err = initEngine(mysqlConfig); err != nil {
-		fmt.Println("mysql is not open:", err)
-		return err
-	}
-
-	return nil
+	return initEngine("mysql", fillMySQLDSN(mysqlConfig))
 }
 
-func fillDns(mysqlConfig map[string]string) string {
+func fillMySQLDSN(mysqlConfig map[string]string) string {
 	return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=%s&parseTime=True&loc=Local",
 		mysqlConfig["user"],
 		mysqlConfig["password"],
@@ -84,37 +46,81 @@ func fillDns(mysqlConfig map[string]string) string {
 		mysqlConfig["charset"])
 }
 
-func initEngine(mysqlConfig map[string]string) error {
-
-	var err error
-	dns := fillDns(mysqlConfig)
-
-	MasterDB, err = xorm.NewEngine("mysql", dns)
+func initEngine(driver, dataSourceName string) error {
+	engine, err := xorm.NewEngine(driver, dataSourceName)
 	if err != nil {
-		return err
+		return fmt.Errorf("không thể tạo kết nối %s: %w", driver, err)
 	}
 
-	maxIdle := config.File.MustInt("mysql", "max_idle", 2)
-	maxConn := config.File.MustInt("mysql", "max_conn", 10)
+	engine.SetMaxIdleConns(envInt("DB_MAX_IDLE_CONNS", config.File.MustInt("mysql", "max_idle", 2)))
+	engine.SetMaxOpenConns(envInt("DB_MAX_OPEN_CONNS", config.File.MustInt("mysql", "max_conn", 10)))
 
-	MasterDB.SetMaxIdleConns(maxIdle)
-	MasterDB.SetMaxOpenConns(maxConn)
-
-	showSQL := config.File.MustBool("xorm", "show_sql", false)
-	logLevel := config.File.MustInt("xorm", "log_level", 1)
-	logFile := config.File.MustValue("xorm", "log_file", "")
+	showSQL := envBool("XORM_SHOW_SQL", config.File.MustBool("xorm", "show_sql", false))
+	logLevel := envInt("XORM_LOG_LEVEL", config.File.MustInt("xorm", "log_level", 1))
+	logFile := strings.TrimSpace(os.Getenv("XORM_LOG_FILE"))
+	if logFile == "" {
+		logFile = config.File.MustValue("xorm", "log_file", "")
+	}
 
 	if logFile != "" {
-		f, _ := os.Create(logFile)
-		MasterDB.SetLogger(log.NewSimpleLogger(f))
+		if dir := filepath.Dir(logFile); dir != "." {
+			_ = os.MkdirAll(dir, 0o755)
+		}
+		if file, fileErr := os.Create(logFile); fileErr == nil {
+			engine.SetLogger(log.NewSimpleLogger(file))
+		} else {
+			fmt.Println("Không thể mở tệp nhật ký SQL:", fileErr)
+		}
 	}
 
-	MasterDB.SetLogLevel(log.LogLevel(logLevel))
-	MasterDB.ShowSQL(showSQL)
+	engine.SetLogLevel(log.LogLevel(logLevel))
+	engine.ShowSQL(showSQL)
 
+	if err = engine.Ping(); err != nil {
+		_ = engine.Close()
+		return fmt.Errorf("không thể kết nối %s: %w", driver, err)
+	}
+
+	if MasterDB != nil {
+		_ = MasterDB.Close()
+	}
+	MasterDB = engine
+
+	fmt.Printf("Đã kết nối cơ sở dữ liệu %s thành công.\n", driver)
 	return nil
 }
 
+func envInt(name string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		fmt.Printf("Biến %s không hợp lệ, dùng giá trị mặc định %d.\n", name, fallback)
+		return fallback
+	}
+	return parsed
+}
+
+func envBool(name string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		fmt.Printf("Biến %s không hợp lệ, dùng giá trị mặc định %t.\n", name, fallback)
+		return fallback
+	}
+	return parsed
+}
+
 func StdMasterDB() *sql.DB {
+	if MasterDB == nil {
+		return nil
+	}
 	return MasterDB.DB().DB
 }

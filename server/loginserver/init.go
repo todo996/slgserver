@@ -1,6 +1,8 @@
 package loginserver
 
 import (
+	"fmt"
+
 	"github.com/llr104/slgserver/db"
 	"github.com/llr104/slgserver/net"
 	"github.com/llr104/slgserver/server/loginserver/controller"
@@ -9,8 +11,11 @@ import (
 var MyRouter = &net.Router{}
 
 func Init() {
-	db.TestDB()
-	//全部初始化完才注册路由，防止服务器还没启动就绪收到请求
+	if err := db.TestDB(); err != nil {
+		panic(fmt.Errorf("login-service không thể kết nối cơ sở dữ liệu: %w", err))
+	}
+
+	// Chỉ đăng ký router sau khi mọi phụ thuộc đã sẵn sàng.
 	initRouter()
 }
 

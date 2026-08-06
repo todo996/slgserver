@@ -1,0 +1,47 @@
+name: Kiểm tra tài liệu tiếng Việt
+
+on:
+  push:
+    branches:
+      - main
+      - 'agent/**'
+    paths:
+      - '**/*.md'
+      - '.github/workflows/docs-vi.yml'
+  pull_request:
+    paths:
+      - '**/*.md'
+      - '.github/workflows/docs-vi.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  audit-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Lấy mã nguồn
+        uses: actions/checkout@v4
+
+      - name: Quét tài liệu chưa Việt hoá
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          cjk = re.compile(r'[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]')
+          errors = []
+          for path in Path('.').rglob('*.md'):
+              if any(part in {'.git', 'vendor', 'bin', 'artifacts'} for part in path.parts):
+                  continue
+              for line_number, line in enumerate(path.read_text(encoding='utf-8').splitlines(), 1):
+                  if cjk.search(line):
+                      errors.append(f'{path}:{line_number}: {line.strip()}')
+
+          if errors:
+              print('Phát hiện nội dung Hán tự chưa Việt hoá:')
+              print('\n'.join(errors))
+              raise SystemExit(1)
+
+          print('Toàn bộ tài liệu Markdown đã được Việt hoá.')
+          PY
