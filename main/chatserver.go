@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/llr104/slgserver/config"
 	"github.com/llr104/slgserver/net"
@@ -10,13 +9,11 @@ import (
 )
 
 func getChatServerAddr() string {
-	host := config.File.MustValue("chatserver", "host", "")
-	port := config.File.MustValue("chatserver", "port", "8002")
-	return host + ":" + port
+	return config.ListenAddress("chatserver", "8002")
 }
 
 func main() {
-	fmt.Println(os.Getwd())
+	fmt.Println("Khởi động Chat Server tại", getChatServerAddr())
 	chatserver.Init()
 	needSecret := config.File.MustBool("chatserver", "need_secret", false)
 	s := net.NewServer(getChatServerAddr(), needSecret)
