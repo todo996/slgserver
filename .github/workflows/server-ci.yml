@@ -23,8 +23,11 @@ jobs:
           go-version: '1.22.x'
           cache: true
 
-      - name: Tải thư viện
-        run: go mod download
+      - name: Đồng bộ thư viện
+        run: go mod tidy
+
+      - name: Hiển thị checksum PostgreSQL
+        run: grep 'github.com/lib/pq' go.sum
 
       - name: Chạy unit test
         run: go test ./...
