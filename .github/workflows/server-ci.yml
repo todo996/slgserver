@@ -40,6 +40,9 @@ jobs:
           go build -o /tmp/chatserver ./main/chatserver.go
           go build -o /tmp/slgserver ./main/slgserver.go
 
+      - name: Build công cụ kiểm thử đăng nhập
+        run: go build -o /tmp/authsmoke ./tools/authsmoke
+
       - name: Build Docker image Railway
         run: docker build -f Dockerfile.railway -t tam-quoc-server:test .
 
@@ -62,10 +65,18 @@ jobs:
     env:
       DATABASE_URL: postgresql://slg:slg@127.0.0.1:5432/slgdb?sslmode=disable
       PGPASSWORD: slg
+      TEST_ACCOUNT_USERNAME: auth-smoke@example.com
       TEST_ACCOUNT_PASSWORD: MatKhau-AnToan-2026
+      TEST_PREVIEW_ORIGIN: https://auth-preview-yrhbmcgnrg-8940s-projects.vercel.app
     steps:
       - name: Lấy mã nguồn
         uses: actions/checkout@v4
+
+      - name: Cài Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+          cache: true
 
       - name: Cài PostgreSQL client
         run: |
@@ -105,48 +116,62 @@ jobs:
       - name: Kiểm tra health tổng và năm thành phần
         run: |
           set -euo pipefail
-          healthy=false
+          ready_ok=false
           for attempt in $(seq 1 180); do
-            response=$(curl --silent http://127.0.0.1:18080/healthz || true)
-            if echo "$response" | grep -q '"status":"ok"'; then
-              healthy=true
-              echo "$response"
+            ready=$(curl --silent http://127.0.0.1:18080/readyz || true)
+            if echo "$ready" | grep -q '"status":"ok"'; then
+              ready_ok=true
+              echo "$ready"
               break
             fi
             sleep 1
           done
-          if [ "$healthy" != "true" ]; then
+          if [ "$ready_ok" != "true" ]; then
             docker logs tam-quoc-one-service || true
             exit 1
           fi
 
           health=$(curl --fail --silent http://127.0.0.1:18080/healthz)
-          for child in login chat slg gate http; do
-            echo "$health" | grep -q "\"$child\":\"ok\""
-          done
+          echo "$health" | grep -q '"status":"ok"'
+          echo "$health" | grep -q '"service":"allserver"'
 
           ready=$(curl --fail --silent http://127.0.0.1:18080/readyz)
           echo "$ready" | grep -q '"service":"allserver"'
+          for child in login chat slg gate http; do
+            echo "$ready" | grep -q "\"$child\":\"ok\""
+          done
 
-      - name: Kiểm tra HTTP API qua cổng public duy nhất
+      - name: Kiểm tra đăng ký HTTP và CORS Preview Vercel
         run: |
           set -euo pipefail
 
           get_status=$(curl --silent --output /dev/null --write-out '%{http_code}' \
-            "http://127.0.0.1:18080/account/register?username=testuser&password=${TEST_ACCOUNT_PASSWORD}")
+            "http://127.0.0.1:18080/account/register?username=${TEST_ACCOUNT_USERNAME}&password=${TEST_ACCOUNT_PASSWORD}")
           test "$get_status" = "405"
 
+          preflight_headers=$(mktemp)
+          preflight_status=$(curl --silent --output /dev/null --dump-header "$preflight_headers" --write-out '%{http_code}' \
+            --request OPTIONS \
+            --header "Origin: ${TEST_PREVIEW_ORIGIN}" \
+            --header 'Access-Control-Request-Method: POST' \
+            http://127.0.0.1:18080/account/register)
+          test "$preflight_status" = "204"
+          grep -qi "access-control-allow-origin: ${TEST_PREVIEW_ORIGIN}" "$preflight_headers"
+
+          register_headers=$(mktemp)
           register_response=$(curl --fail --silent --request POST \
+            --dump-header "$register_headers" \
             --header 'Content-Type: application/x-www-form-urlencoded' \
-            --header 'Origin: http://localhost:4173' \
-            --data-urlencode 'username=testuser' \
+            --header "Origin: ${TEST_PREVIEW_ORIGIN}" \
+            --data-urlencode "username=${TEST_ACCOUNT_USERNAME}" \
             --data-urlencode "password=${TEST_ACCOUNT_PASSWORD}" \
             --data-urlencode 'hardware=github-actions' \
             http://127.0.0.1:18080/account/register)
           echo "$register_response" | grep -q '"code":0'
+          grep -qi "access-control-allow-origin: ${TEST_PREVIEW_ORIGIN}" "$register_headers"
 
           stored_hash=$(psql -h 127.0.0.1 -U slg -d slgdb -Atc \
-            "SELECT passwd FROM public.tb_user_info WHERE username='testuser';")
+            "SELECT passwd FROM public.tb_user_info WHERE username='${TEST_ACCOUNT_USERNAME}';")
           case "$stored_hash" in
             '$2a$'*|'$2b$'*|'$2y$'*) ;;
             *) echo "Mật khẩu không phải bcrypt"; exit 1 ;;
@@ -156,30 +181,20 @@ jobs:
 
           duplicate_response=$(curl --fail --silent --request POST \
             --header 'Content-Type: application/x-www-form-urlencoded' \
-            --data-urlencode 'username=testuser' \
+            --header "Origin: ${TEST_PREVIEW_ORIGIN}" \
+            --data-urlencode "username=${TEST_ACCOUNT_USERNAME}" \
             --data-urlencode "password=${TEST_ACCOUNT_PASSWORD}" \
             http://127.0.0.1:18080/account/register)
           echo "$duplicate_response" | grep -q '"code":3'
 
-      - name: Kiểm tra WebSocket qua cùng cổng public
+      - name: Kiểm tra đăng nhập WebSocket thật qua cổng public
         run: |
           set -euo pipefail
-          headers=$(mktemp)
-          set +e
-          curl --http1.1 --silent --show-error --max-time 3 \
-            --dump-header "$headers" \
-            --output /dev/null \
-            --header 'Connection: Upgrade' \
-            --header 'Upgrade: websocket' \
-            --header 'Sec-WebSocket-Version: 13' \
-            --header 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
-            --header 'Origin: http://localhost:4173' \
-            http://127.0.0.1:18080/
-          curl_status=$?
-          set -e
-          cat "$headers"
-          grep -q '101 Switching Protocols' "$headers"
-          test "$curl_status" = "0" || test "$curl_status" = "28"
+          AUTH_SMOKE_WS_URL=ws://127.0.0.1:18080 \
+          AUTH_SMOKE_ORIGIN="$TEST_PREVIEW_ORIGIN" \
+          AUTH_SMOKE_USERNAME="$TEST_ACCOUNT_USERNAME" \
+          AUTH_SMOKE_PASSWORD="$TEST_ACCOUNT_PASSWORD" \
+            go run ./tools/authsmoke
 
       - name: Dừng container và kiểm tra log cuối
         if: always()
