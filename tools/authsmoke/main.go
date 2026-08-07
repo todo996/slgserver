@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/forgoer/openssl"
@@ -39,6 +40,8 @@ func main() {
 	_ = conn.SetWriteDeadline(time.Now().Add(15 * time.Second))
 
 	secretKey := readHandshake(conn)
+	fmt.Printf("Handshake thành công, secret=%t\n", secretKey != "")
+
 	request := &gamenet.ReqBody{
 		Seq:  1,
 		Name: "account.login",
@@ -94,17 +97,30 @@ func main() {
 
 	loginResponse := &gamenet.RspBody{}
 	if err = util.Unmarshal(responsePayload, loginResponse); err != nil {
-		fatalf("phản hồi đăng nhập không phải JSON hợp lệ: %v", err)
+		fatalf(
+			"phản hồi đăng nhập không phải JSON hợp lệ: %v; payload=%q",
+			err,
+			truncate(string(responsePayload), 300),
+		)
 	}
+	fmt.Printf(
+		"Phản hồi đăng nhập: name=%q seq=%d code=%d msg=%#v\n",
+		loginResponse.Name,
+		loginResponse.Seq,
+		loginResponse.Code,
+		loginResponse.Msg,
+	)
+
 	if loginResponse.Name != "account.login" || loginResponse.Seq != 1 {
 		fatalf(
-			"phản hồi đăng nhập không khớp: name=%q seq=%d",
+			"phản hồi đăng nhập không khớp: name=%q seq=%d code=%d",
 			loginResponse.Name,
 			loginResponse.Seq,
+			loginResponse.Code,
 		)
 	}
 	if loginResponse.Code != 0 {
-		fatalf("đăng nhập bị từ chối, code=%d", loginResponse.Code)
+		fatalf("đăng nhập bị từ chối, code=%d msg=%#v", loginResponse.Code, loginResponse.Msg)
 	}
 
 	loginData := &loginproto.LoginRsp{}
@@ -113,10 +129,11 @@ func main() {
 	}
 	if loginData.Session == "" || loginData.UId <= 0 || loginData.Username != username {
 		fatalf(
-			"phiên đăng nhập không hợp lệ: uid=%d username=%q session_empty=%t",
+			"phiên đăng nhập không hợp lệ: uid=%d username=%q session_empty=%t msg=%#v",
 			loginData.UId,
 			loginData.Username,
 			loginData.Session == "",
+			loginResponse.Msg,
 		)
 	}
 
@@ -135,15 +152,15 @@ func readHandshake(conn *websocket.Conn) string {
 
 	response := &gamenet.RspBody{}
 	if err = util.Unmarshal(payload, response); err != nil {
-		fatalf("handshake không phải JSON hợp lệ: %v", err)
+		fatalf("handshake không phải JSON hợp lệ: %v payload=%q", err, truncate(string(payload), 300))
 	}
 	if response.Name != gamenet.HandshakeMsg {
-		fatalf("mong đợi handshake nhưng nhận %q", response.Name)
+		fatalf("mong đợi handshake nhưng nhận %q, code=%d", response.Name, response.Code)
 	}
 
 	handshake := &gamenet.Handshake{}
 	if err = mapstructure.Decode(response.Msg, handshake); err != nil {
-		fatalf("không thể đọc khóa handshake: %v", err)
+		fatalf("không thể đọc khóa handshake: %v msg=%#v", err, response.Msg)
 	}
 	return handshake.Key
 }
@@ -155,7 +172,21 @@ func envOr(name, fallback string) string {
 	return fallback
 }
 
+func truncate(value string, max int) string {
+	if len(value) <= max {
+		return value
+	}
+	return value[:max] + "…"
+}
+
 func fatalf(format string, args ...interface{}) {
-	fmt.Fprintf(os.Stderr, format+"\n", args...)
+	message := fmt.Sprintf(format, args...)
+	annotation := strings.NewReplacer(
+		"%", "%25",
+		"\r", "%0D",
+		"\n", "%0A",
+	).Replace(message)
+	fmt.Fprintf(os.Stderr, "::error title=Auth smoke thất bại::%s\n", annotation)
+	fmt.Fprintln(os.Stderr, message)
 	os.Exit(1)
 }
