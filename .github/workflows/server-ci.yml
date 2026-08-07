@@ -96,6 +96,7 @@ jobs:
           test "$(psql -h 127.0.0.1 -U slg -d slgdb -Atc "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_name LIKE 'tb_%';")" -ge 16
           test "$(psql -h 127.0.0.1 -U slg -d slgdb -Atc "SELECT data_type FROM information_schema.columns WHERE table_name='tb_general_1' AND column_name='skills';")" = "jsonb"
           test "$(psql -h 127.0.0.1 -U slg -d slgdb -Atc "SELECT data_type FROM information_schema.columns WHERE table_name='tb_user_info' AND column_name='passwd';")" = "character varying"
+          test "$(psql -h 127.0.0.1 -U slg -d slgdb -Atc "SELECT character_maximum_length FROM information_schema.columns WHERE table_name='tb_user_info' AND column_name='username';")" = "50"
 
       - name: Build Docker image hợp nhất
         run: docker build -f Dockerfile.railway -t tam-quoc-server:one-service .
@@ -189,12 +190,21 @@ jobs:
 
       - name: Kiểm tra đăng nhập WebSocket thật qua cổng public
         run: |
-          set -euo pipefail
-          AUTH_SMOKE_WS_URL=ws://127.0.0.1:18080 \
-          AUTH_SMOKE_ORIGIN="$TEST_PREVIEW_ORIGIN" \
-          AUTH_SMOKE_USERNAME="$TEST_ACCOUNT_USERNAME" \
-          AUTH_SMOKE_PASSWORD="$TEST_ACCOUNT_PASSWORD" \
-            go run ./tools/authsmoke
+          set +e
+          output=$(AUTH_SMOKE_WS_URL=ws://127.0.0.1:18080 \
+            AUTH_SMOKE_ORIGIN="$TEST_PREVIEW_ORIGIN" \
+            AUTH_SMOKE_USERNAME="$TEST_ACCOUNT_USERNAME" \
+            AUTH_SMOKE_PASSWORD="$TEST_ACCOUNT_PASSWORD" \
+            go run ./tools/authsmoke 2>&1)
+          status=$?
+          printf '%s\n' "$output"
+          if [ "$status" -ne 0 ]; then
+            escaped=${output//'%'/'%25'}
+            escaped=${escaped//$'\r'/'%0D'}
+            escaped=${escaped//$'\n'/'%0A'}
+            echo "::error file=tools/authsmoke/main.go,line=1,title=Đăng nhập WebSocket thất bại::$escaped"
+            exit "$status"
+          fi
 
       - name: Dừng container và kiểm tra log cuối
         if: always()
