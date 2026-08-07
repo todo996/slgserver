@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
@@ -13,6 +14,8 @@ import (
 	"github.com/llr104/slgserver/server/httpserver/controller"
 )
 
+const vercelPreviewSuffix = "-yrhbmcgnrg-8940s-projects.vercel.app"
+
 func main() {
 	if err := db.TestDB(); err != nil {
 		log.Fatal("Không thể kết nối cơ sở dữ liệu: ", err)
@@ -22,9 +25,23 @@ func main() {
 	e.HideBanner = true
 	e.Use(mw.Recover())
 	e.Use(mw.CORSWithConfig(mw.CORSConfig{
-		AllowOrigins: allowedOrigins(),
-		AllowMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions},
-		AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization},
+		AllowOriginFunc: func(origin string) (bool, error) {
+			return isAllowedHTTPOrigin(origin), nil
+		},
+		AllowMethods: []string{
+			http.MethodGet,
+			http.MethodPost,
+			http.MethodPut,
+			http.MethodPatch,
+			http.MethodDelete,
+			http.MethodOptions,
+		},
+		AllowHeaders: []string{
+			echo.HeaderOrigin,
+			echo.HeaderContentType,
+			echo.HeaderAccept,
+			echo.HeaderAuthorization,
+		},
 	}))
 
 	e.GET("/healthz", func(c echo.Context) error {
@@ -44,6 +61,33 @@ func main() {
 
 func getHTTPAddr() string {
 	return config.ListenAddress("httpserver", "8088")
+}
+
+func isAllowedHTTPOrigin(origin string) bool {
+	origin = strings.TrimSpace(origin)
+	if origin == "" {
+		return true
+	}
+	if isSLGClientVercelOrigin(origin) {
+		return true
+	}
+
+	for _, allowed := range allowedOrigins() {
+		if allowed == "*" || strings.EqualFold(allowed, origin) {
+			return true
+		}
+	}
+	return false
+}
+
+func isSLGClientVercelOrigin(origin string) bool {
+	parsed, err := url.Parse(origin)
+	if err != nil || !strings.EqualFold(parsed.Scheme, "https") {
+		return false
+	}
+
+	host := strings.ToLower(parsed.Hostname())
+	return host == "slgclient.vercel.app" || strings.HasSuffix(host, vercelPreviewSuffix)
 }
 
 func allowedOrigins() []string {
