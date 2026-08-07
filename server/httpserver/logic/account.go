@@ -26,8 +26,11 @@ func (self UserLogic) CreateUser(ctx echo.Context) error {
 	password := requestParam(ctx, "password")
 	hardware := strings.TrimSpace(requestParam(ctx, "hardware"))
 
-	if !validUsername(account) || !validPasswordValue(password) {
-		return myhttp.New("Tài khoản hoặc mật khẩu không hợp lệ.", constant.InvalidParam)
+	if !validUsername(account) {
+		return myhttp.New("Tài khoản phải có 3-50 ký tự và chỉ dùng chữ, số, _ - . @ +.", constant.InvalidParam)
+	}
+	if !validPasswordValue(password) {
+		return myhttp.New("Mật khẩu phải có từ 8 đến 72 byte.", constant.InvalidParam)
 	}
 	if utf8.RuneCountInString(hardware) > 64 {
 		return myhttp.New("Mã thiết bị vượt quá độ dài cho phép.", constant.InvalidParam)
@@ -111,12 +114,13 @@ func requestParam(ctx echo.Context, name string) string {
 
 func validUsername(value string) bool {
 	length := utf8.RuneCountInString(value)
-	if length < 3 || length > 20 {
+	if length < 3 || length > 50 {
 		return false
 	}
 
 	for _, char := range value {
-		if unicode.IsLetter(char) || unicode.IsNumber(char) || char == '_' || char == '-' || char == '.' {
+		if unicode.IsLetter(char) || unicode.IsNumber(char) ||
+			char == '_' || char == '-' || char == '.' || char == '@' || char == '+' {
 			continue
 		}
 		return false
