@@ -24,25 +24,7 @@ func main() {
 	e := echo.New()
 	e.HideBanner = true
 	e.Use(mw.Recover())
-	e.Use(mw.CORSWithConfig(mw.CORSConfig{
-		AllowOriginFunc: func(origin string) (bool, error) {
-			return isAllowedHTTPOrigin(origin), nil
-		},
-		AllowMethods: []string{
-			http.MethodGet,
-			http.MethodPost,
-			http.MethodPut,
-			http.MethodPatch,
-			http.MethodDelete,
-			http.MethodOptions,
-		},
-		AllowHeaders: []string{
-			echo.HeaderOrigin,
-			echo.HeaderContentType,
-			echo.HeaderAccept,
-			echo.HeaderAuthorization,
-		},
-	}))
+	e.Use(corsMiddleware())
 
 	e.GET("/healthz", func(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]string{
@@ -61,6 +43,39 @@ func main() {
 
 func getHTTPAddr() string {
 	return config.ListenAddress("httpserver", "8088")
+}
+
+func corsMiddleware() echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			request := c.Request()
+			response := c.Response()
+			origin := strings.TrimSpace(request.Header.Get(echo.HeaderOrigin))
+			allowed := origin == "" || isAllowedHTTPOrigin(origin)
+
+			if origin != "" && allowed {
+				response.Header().Set(echo.HeaderAccessControlAllowOrigin, origin)
+				response.Header().Add(echo.HeaderVary, echo.HeaderOrigin)
+				response.Header().Set(
+					echo.HeaderAccessControlAllowMethods,
+					"GET,POST,PUT,PATCH,DELETE,OPTIONS",
+				)
+				response.Header().Set(
+					echo.HeaderAccessControlAllowHeaders,
+					"Origin,Content-Type,Accept,Authorization",
+				)
+			}
+
+			if request.Method == http.MethodOptions {
+				if !allowed {
+					return c.NoContent(http.StatusForbidden)
+				}
+				return c.NoContent(http.StatusNoContent)
+			}
+
+			return next(c)
+		}
+	}
 }
 
 func isAllowedHTTPOrigin(origin string) bool {
