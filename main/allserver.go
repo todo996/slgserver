@@ -41,7 +41,7 @@ type childExit struct {
 type healthState struct {
 	Status   string            `json:"status"`
 	Service  string            `json:"service"`
-	Children map[string]string `json:"children"`
+	Children map[string]string `json:"children,omitempty"`
 }
 
 func main() {
@@ -54,16 +54,16 @@ func main() {
 	}
 
 	commonEnv := map[string]string{
-		"LOGIN_HOST":     "127.0.0.1",
-		"LOGIN_PORT":     "8003",
-		"CHAT_HOST":      "127.0.0.1",
-		"CHAT_PORT":      "8002",
-		"SLG_HOST":       "127.0.0.1",
-		"SLG_PORT":       "8001",
-		"GATE_HOST":      "127.0.0.1",
-		"GATE_PORT":      "8004",
-		"HTTP_HOST":      "127.0.0.1",
-		"HTTP_PORT":      "8088",
+		"LOGIN_HOST":      "127.0.0.1",
+		"LOGIN_PORT":      "8003",
+		"CHAT_HOST":       "127.0.0.1",
+		"CHAT_PORT":       "8002",
+		"SLG_HOST":        "127.0.0.1",
+		"SLG_PORT":        "8001",
+		"GATE_HOST":       "127.0.0.1",
+		"GATE_PORT":       "8004",
+		"HTTP_HOST":       "127.0.0.1",
+		"HTTP_PORT":       "8088",
 		"LOGIN_PROXY_URL": "ws://127.0.0.1:8003",
 		"CHAT_PROXY_URL":  "ws://127.0.0.1:8002",
 		"SLG_PROXY_URL":   "ws://127.0.0.1:8001",
@@ -74,7 +74,6 @@ func main() {
 		}
 	}
 
-	exits := make(chan childExit, 8)
 	children := []childSpec{
 		{name: "login", binary: "loginserver", health: loginURL + "/healthz"},
 		{name: "chat", binary: "chatserver", health: chatURL + "/healthz"},
@@ -82,28 +81,17 @@ func main() {
 		{name: "gate", binary: "gateserver", health: gateURL + "/healthz"},
 		{name: "http", binary: "httpserver", health: httpURL + "/healthz"},
 	}
-
-	for _, child := range children {
-		child.env = commonEnv
-		if err := startChild(ctx, binaryDir, child, exits); err != nil {
-			stop()
-			log.Fatalf("Không thể khởi động %s: %v", child.name, err)
-		}
+	for index := range children {
+		children[index].env = commonEnv
 	}
 
-	startupTimeout := durationFromEnv("STARTUP_TIMEOUT", 180*time.Second)
-	for _, child := range children {
-		if err := waitHealthy(ctx, child, exits, startupTimeout); err != nil {
-			stop()
-			log.Fatalf("%s không sẵn sàng: %v", child.name, err)
-		}
-		log.Printf("%s đã sẵn sàng", child.name)
-	}
-
+	// Railway cần thấy cổng public lắng nghe ngay trong giai đoạn khởi động.
+	// /healthz chỉ kiểm tra tiến trình hợp nhất còn sống; /readyz mới kiểm tra
+	// đầy đủ năm service con đã sẵn sàng.
 	gateProxy := newReverseProxy(gateURL)
 	httpProxy := newReverseProxy(httpURL)
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", aggregateHealth(children))
+	mux.HandleFunc("/healthz", livenessHealth)
 	mux.HandleFunc("/readyz", aggregateHealth(children))
 	mux.HandleFunc("/", func(response http.ResponseWriter, request *http.Request) {
 		if isWebSocket(request) {
@@ -130,6 +118,24 @@ func main() {
 			publicErrors <- err
 		}
 	}()
+
+	exits := make(chan childExit, 8)
+	for _, child := range children {
+		if err := startChild(ctx, binaryDir, child, exits); err != nil {
+			stop()
+			log.Fatalf("Không thể khởi động %s: %v", child.name, err)
+		}
+	}
+
+	startupTimeout := durationFromEnv("STARTUP_TIMEOUT", 180*time.Second)
+	for _, child := range children {
+		if err := waitHealthy(ctx, child, exits, publicErrors, startupTimeout); err != nil {
+			stop()
+			log.Fatalf("%s không sẵn sàng: %v", child.name, err)
+		}
+		log.Printf("%s đã sẵn sàng", child.name)
+	}
+	log.Printf("Toàn bộ năm thành phần backend đã sẵn sàng")
 
 	exitCode := 0
 	select {
@@ -180,7 +186,13 @@ func startChild(ctx context.Context, binaryDir string, spec childSpec, exits cha
 	return nil
 }
 
-func waitHealthy(ctx context.Context, spec childSpec, exits <-chan childExit, timeout time.Duration) error {
+func waitHealthy(
+	ctx context.Context,
+	spec childSpec,
+	exits <-chan childExit,
+	publicErrors <-chan error,
+	timeout time.Duration,
+) error {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	ticker := time.NewTicker(500 * time.Millisecond)
@@ -193,6 +205,8 @@ func waitHealthy(ctx context.Context, spec childSpec, exits <-chan childExit, ti
 			return ctx.Err()
 		case child := <-exits:
 			return fmt.Errorf("%s đã dừng khi khởi động: %w", child.name, child.err)
+		case err := <-publicErrors:
+			return fmt.Errorf("cổng public dừng khi khởi động: %w", err)
 		case <-deadline.C:
 			return fmt.Errorf("hết thời gian chờ %s", spec.health)
 		case <-ticker.C:
@@ -205,6 +219,15 @@ func waitHealthy(ctx context.Context, spec childSpec, exits <-chan childExit, ti
 			}
 		}
 	}
+}
+
+func livenessHealth(response http.ResponseWriter, _ *http.Request) {
+	response.Header().Set("Content-Type", "application/json; charset=utf-8")
+	response.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(response).Encode(healthState{
+		Status:  "ok",
+		Service: "allserver",
+	})
 }
 
 func aggregateHealth(children []childSpec) http.HandlerFunc {
