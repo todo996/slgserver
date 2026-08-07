@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -12,6 +13,8 @@ import (
 	"github.com/llr104/slgserver/log"
 	"go.uber.org/zap"
 )
+
+const slgClientPreviewSuffix = "-yrhbmcgnrg-8940s-projects.vercel.app"
 
 var wsUpgrader = websocket.Upgrader{
 	HandshakeTimeout: 10 * time.Second,
@@ -88,7 +91,10 @@ func (this *server) wsHandler(resp http.ResponseWriter, req *http.Request) {
 func websocketOriginAllowed(req *http.Request) bool {
 	origin := strings.TrimSpace(req.Header.Get("Origin"))
 	if origin == "" {
-		// Kết nối giữa các service Railway không bắt buộc gửi Origin.
+		// Kết nối nội bộ giữa các service Railway có thể không gửi Origin.
+		return true
+	}
+	if isSLGClientWebOrigin(origin) {
 		return true
 	}
 
@@ -103,4 +109,14 @@ func websocketOriginAllowed(req *http.Request) bool {
 		}
 	}
 	return false
+}
+
+func isSLGClientWebOrigin(origin string) bool {
+	parsed, err := url.Parse(origin)
+	if err != nil || !strings.EqualFold(parsed.Scheme, "https") {
+		return false
+	}
+
+	host := strings.ToLower(parsed.Hostname())
+	return host == "slgclient.vercel.app" || strings.HasSuffix(host, slgClientPreviewSuffix)
 }
